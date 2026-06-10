@@ -22,8 +22,10 @@ class Node:
 
     def absorb(self, x: np.ndarray) -> None:
         """
-        TODO: Pull the centroid toward x and increase the count.
-        - increase m_i by 1
-        - w_i = w_i + (1 / m_i) * (x - w_i)
+        Pull the centroid toward x and increase the count (Eq. 7).
+
+        The count is incremented first so the new m_i is the denominator of the
+        learning rate; this makes w_i the running mean of all absorbed patterns.
         """
-        pass
+        self.m += 1.0
+        self.w = self.w + (1.0 / self.m) * (x - self.w)
