@@ -68,6 +68,11 @@ def main():
     # Offline phase / evaluation
     parser.add_argument('--offline_interval', type=int, default=1,
                         help='Run offline clustering + evaluation every N batches (0 = only at end of stream)')
+    parser.add_argument('--paper-eval', action='store_true',
+                        help='Final evaluation labels each point by its nearest surviving node '
+                             '(predict_points) instead of the stored online assignment ids. '
+                             'Matches the paper protocol and is robust to nodes removed by '
+                             'denoising; slightly slower.')
 
     args = parser.parse_args()
 
@@ -128,16 +133,21 @@ def main():
             print(f"          [Offline] clusters this batch: {num_clusters}")
             _evaluate(list(batch), list(y[start_idx:end_idx]), labels, list(timestamps))
 
-    # Final offline phase + evaluation — uses stored authoritative assignments
-    # for the full stream, no nearest-node approximation needed.
-    # TODO (paper reproduction): to match the paper, label each point by its
-    # nearest surviving node instead, i.e. replace the line below with
-    #   final_labels = densoinn.predict_points(np.array(all_X))
+    # Final offline phase + evaluation.
     print(f"\n--- Final offline clustering + evaluation ---")
-    final_labels = densoinn.predict(assignments=all_assignments)
+    if args.paper_eval:
+        # Paper reproduction: label every point by its nearest surviving node,
+        # then map node -> macro-cluster label. Robust to nodes deleted during
+        # denoising, where a stored summary_id may point to a removed node.
+        final_labels = densoinn.predict_points(np.array(all_X))
+    else:
+        # Default: map each point's stored authoritative summary_id (node id)
+        # to its macro-cluster label; no nearest-node approximation needed.
+        final_labels = densoinn.predict(assignments=all_assignments)
     final_arr = np.array(final_labels)
     unique_clusters = np.unique(final_arr[final_arr != -1])
-    print(f"    Total points: {len(all_X)}  |  clusters: {len(unique_clusters)}")
+    label_mode = 'nearest-node (paper)' if args.paper_eval else 'stored assignments'
+    print(f"    Total points: {len(all_X)}  |  clusters: {len(unique_clusters)}  |  labeling: {label_mode}")
     _evaluate(all_X, all_y, final_labels, all_ts)
 
 
