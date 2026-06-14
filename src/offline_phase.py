@@ -24,10 +24,6 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         Estimated intrinsic dimensionality n' used in the density estimate.
         A small value such as 2 usually works.
 
-    NOTE: this phase needs the network topology, not just isolated centroids.
-    The connected components come from the graph edges (see
-    DenSOINNNetwork.connected_components). The provided DensityPeakClustering
-    helper can optionally be reused per component for the peak logic.
     """
 
     def __init__(self, alpha: float = 5.0, intrinsic_dim: int = 2):
@@ -37,25 +33,58 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
 
     def predict_summaries(self, summaries: dict) -> dict:
         """
-        TODO: cluster the nodes and return a dict
-        {node_id: macro_cluster_label} (noise label is -1).
-          1. compute node density p_i for every node
-          2. split the network into connected components
-          3. for each component:
-               - sort nodes by descending density
-               - for each node, find nearest node of higher density q_i
-                 and its peak score h_i = p_i * d(w_i, w_qi)
-               - compute mean peak score h_mean
-               - a node is a center if h_i >= alpha * h_mean
-                 otherwise it joins the cluster of q_i
+        Clusters the network nodes and returns {node_id: macro_cluster_label}
         """
         # input:  dict of node summaries (centroid, weight, neighbors)
         # output: dict mapping node_id -> final cluster label
-        pass
+        if not summaries:
+            return {}
+
+        # 1. Compute densities
+        densities = self._node_density(summaries)
+
+        # 2. Split into Connected Components (BFS)
+        visited = set()
+        components = []
+        
+        for node in summaries:
+            if node not in visited:
+                comp = []
+                queue = [node]
+                visited.add(node)
+                
+                while queue:
+                    curr = queue.pop(0)
+                    comp.append(curr)
+                    
+                    # Iterate through the topological neighbors provided in the summary dict
+                    for nbr in summaries[curr]["neighbors"]:
+                        if nbr not in visited and nbr in summaries:
+                            visited.add(nbr)
+                            queue.append(nbr)
+                            
+                components.append(comp)
+        
+
+        # 3. Find peaks per component and offset global labels
+        final_labels = {}
+        global_label_offset = 0
+
+        for comp in components:
+            local_labels = self._find_cluster_centers(comp, densities, summaries)
+            
+            # Map local labels to global labels so clusters from different components don't share IDs
+            for node_id, loc_label in local_labels.items():
+                final_labels[node_id] = global_label_offset + loc_label
+
+            if local_labels:
+                global_label_offset += len(set(local_labels.values()))
+
+        return final_labels
 
     def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
         """
-        TODO: map a list of node assignments (one node id per raw point) to
+        map a list of node assignments (one node id per raw point) to
         final macro-cluster labels, using predict_summaries as a lookup table.
         The super class already implements this generic mapping; override
         if DenSOINN needs different behaviour.
@@ -67,17 +96,90 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
     # ------------------------------------------------------------------ #
     def _node_density(self, summaries: dict) -> dict:
         """
-        TODO: estimate the density p_i of every node.
+        estimate the density p_i of every node.
         p_i ∝ m_i / (1 + d_i^2), where m_i is the node weight and d_i is the
         node's neighborhood radius (e.g. mean distance to its neighbors).
         Return {node_id: p_i}.
         """
-        pass
+        densities = {}
+        for node_id, data in summaries.items():
+            m_i = data["weight"]
+            w_i = data["centroid"]
+            neighbors = data["neighbors"]
+            
+            if not neighbors:
+                # Isolated node
+                p_i = float(m_i)
+            else:
+                # 1. Calculate the mean distance to topological neighbors (d_i)
+                dists = [np.linalg.norm(w_i - summaries[nbr]["centroid"]) for nbr in neighbors]
+                d_i = np.mean(dists)
+                
+                # 2. Apply intrinsic dimensionality (n') from the paper
+                p_i = m_i / (1.0 + (d_i ** self.intrinsic_dim))
+                
+            densities[node_id] = p_i
+            
+        return densities
 
     def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict) -> dict:
         """
-        TODO: given one connected component, find density
-        peaks (q_i, h_i), apply the alpha * h_mean rule, and return the local
-        labeling for the nodes in this component.
+        Finds density peaks within a component and cascades labels downhill.
         """
-        pass
+        if not component: 
+            return {}
+        if len(component) == 1: 
+            return {component[0]: 0} # Only one node, it's its own center
+
+        # 1. Sort nodes by density descending
+        sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
+
+        q = {} # q[i] = nearest node of higher density
+        h = {} # h[i] = peak score
+
+        # 2. Find nearest higher-density node and calculate distances
+        for k in range(1, len(sorted_nodes)):
+            i = sorted_nodes[k]
+            w_i = summaries[i]["centroid"]
+
+            # Candidates are nodes with higher density (indices 0 to k-1)
+            candidates = sorted_nodes[:k]
+            dists = [np.linalg.norm(w_i - summaries[c]["centroid"]) for c in candidates]
+
+            min_idx = np.argmin(dists)
+            q_i = candidates[min_idx]
+            d_min = dists[min_idx]
+
+            q[i] = q_i
+            h[i] = densities[i] * d_min
+
+        # 3. Handle the absolute highest density node (Global Peak of component)
+        peak_node = sorted_nodes[0]
+        # Its distance is the maximum distance to any other node in the component
+        max_dist = max(np.linalg.norm(summaries[peak_node]["centroid"] - summaries[c]["centroid"]) for c in sorted_nodes[1:])
+        h[peak_node] = densities[peak_node] * max_dist
+
+        # 4. Calculate threshold and assign centers
+        h_mean = np.mean(list(h.values()))
+        
+        local_labels = {}
+        current_label = 0
+
+        for node in sorted_nodes:
+            # If peak score is high enough, it is a cluster center
+            if h[node] >= self.alpha * h_mean:
+                local_labels[node] = current_label
+                current_label += 1
+
+        # Fallback: if alpha is too strict and no centers pass, force the peak to be a center
+        if not local_labels:
+            local_labels[peak_node] = 0
+            current_label = 1
+
+        # 5. Cascade labels downhill
+        for node in sorted_nodes:
+            if node not in local_labels:
+                # Inherit the label from the nearest higher density node (moving uphill)
+                local_labels[node] = local_labels[q[node]]
+
+        return local_labels

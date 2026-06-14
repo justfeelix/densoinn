@@ -66,7 +66,6 @@ class DenSOINN:
 
     def predict_points(self, X):
         """
-        TODO:
         Label each raw point by its NEAREST surviving node, then map node ->
         macro-cluster label. This reproduces the paper's evaluation protocol
         (each pattern is labeled by its nearest exemplar in the final model)
@@ -84,4 +83,28 @@ class DenSOINN:
         Switch run_densoinn.py's final evaluation to this method once the
         algorithm is implemented and you want to match the paper's numbers.
         """
-        raise NotImplementedError("predict_points: implement nearest-node labeling for paper reproduction")
+        summaries = self.online_phase.get_summary()
+        if not summaries:
+            return np.full(len(X), -1)
+
+        node_labels = self.offline_phase.predict_summaries(summaries)
+
+        node_ids = list(summaries.keys())
+        centroids = np.array([summaries[nid]["centroid"] for nid in node_ids])
+        labels = np.array([node_labels.get(nid, -1) for nid in node_ids])
+
+        final_assignments = []
+        
+        # We process X in a loop (or vectorized if memory permits)
+        for x in X:
+            # Use the self-adaptive metric if available, otherwise Euclidean
+            if self.online_phase.metric is not None and len(centroids) > 0:
+                # The metric expects (point, stacked_centroids)
+                dists = self.online_phase.metric.distance_to_nodes(x, centroids)
+            else:
+                dists = np.linalg.norm(centroids - x, axis=1)
+
+            nearest_idx = np.argmin(dists)
+            final_assignments.append(labels[nearest_idx])
+
+        return np.array(final_assignments)
