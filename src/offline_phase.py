@@ -24,10 +24,6 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         Estimated intrinsic dimensionality n' used in the density estimate.
         A small value such as 2 usually works.
 
-    NOTE: this phase needs the network topology, not just isolated centroids.
-    The connected components come from the graph edges (see
-    DenSOINNNetwork.connected_components). The provided DensityPeakClustering
-    helper can optionally be reused per component for the peak logic.
     """
 
     def __init__(self, alpha: float = 5.0, intrinsic_dim: int = 2):
