@@ -76,6 +76,37 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         if DenSOINN needs different behaviour.
         """
         return super().predict_assignment(assignments, summaries)
+    
+
+    def predict_summaries_with_stages(self, summaries: dict) -> dict:
+        """
+        Same clustering as predict_summaries(), but also returns the
+        intermediate stages (components, per-component centers) for
+        visualization. predict_summaries() remains the lean, label-only
+        entry point used by the rest of the pipeline.
+        """
+        if not summaries:
+            return {"components": [], "centers": set(), "labels": {}}
+
+        metric = self._build_metric(summaries)
+        densities = self._node_density(summaries, metric)
+        components = self._get_components_from_summaries(summaries)
+
+        final_labels = {}
+        all_centers = set()
+        global_label_offset = 0
+
+        for comp in components:
+            local_labels, comp_centers = self._find_cluster_centers_plus(comp, densities, summaries, metric)
+            all_centers |= comp_centers
+
+            for node_id, loc_label in local_labels.items():
+                final_labels[node_id] = global_label_offset + loc_label
+
+            if local_labels:
+                global_label_offset += len(set(local_labels.values()))
+
+        return {"components": components, "centers": all_centers, "labels": final_labels}
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -206,3 +237,53 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 local_labels[node] = local_labels[q[node]]
 
         return local_labels
+
+
+    def _find_cluster_centers_plus(self, component: list[int], densities: dict, summaries: dict, metric) -> tuple[dict, set]:
+        """
+        Finds density peaks within a component and cascades labels downhill.
+        Returns (local_labels, centers) where centers is the set of node ids
+        chosen as cluster centers in this component (before cascading).
+        """
+        if not component:
+            return {}, set()
+        if len(component) == 1:
+            return {component[0]: 0}, {component[0]}
+
+        sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
+
+        q = {}
+        h = {}
+
+        for k in range(1, len(sorted_nodes)):
+            i = sorted_nodes[k]
+            w_i = summaries[i]["centroid"]
+            candidates = [c for c in sorted_nodes[:k] if densities[c] > densities[i]]
+            if not candidates:
+                candidates = sorted_nodes[:k]
+            dists = [metric.distance(w_i, summaries[c]["centroid"]) for c in candidates]
+            min_idx = np.argmin(dists)
+            q_i = candidates[min_idx]
+            d_min = dists[min_idx]
+            q[i] = q_i
+            h[i] = densities[i] * d_min
+
+        peak_node = sorted_nodes[0]
+        non_peak_nodes = sorted_nodes[1:]
+
+        local_labels = {peak_node: 0}
+        current_label = 1
+        h_mean = np.mean([h[node] for node in non_peak_nodes])
+
+        for node in non_peak_nodes:
+            if h[node] >= self.alpha * h_mean:
+                local_labels[node] = current_label
+                current_label += 1
+
+        centers = set(local_labels.keys())  # NEW: capture centers before cascading
+
+        for node in sorted_nodes:
+            if node not in local_labels:
+                local_labels[node] = local_labels[q[node]]
+
+        return local_labels, centers
