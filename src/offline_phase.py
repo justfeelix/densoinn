@@ -2,8 +2,9 @@
 Offline clustering of DenSOINN nodes by density.
 """
 import numpy as np
-from baseframework.offline_clustering.density_peak_clustering import DensityPeakClustering
 from baseframework.stream_clustering import OfflinePhase_Clusterer
+from .distance_metric import SelfAdaptiveDistanceMetric
+
 
 
 class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
@@ -39,11 +40,62 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         # output: dict mapping node_id -> final cluster label
         if not summaries:
             return {}
+        
+        # 0. Rebuild the self-adaptive metric (Algorithm 1) from the final node centroids, so offline distances stay consistent with the online phase's notion of d(x, y) 
+        # instead of falling back to plain Euclidean distance on raw, unnormalized features
+        metric = self._build_metric(summaries)
 
         # 1. Compute densities
-        densities = self._node_density(summaries)
+        densities = self._node_density(summaries, metric)
 
-        # 2. Split into Connected Components (BFS)
+        # 2. Split network into Connected Components (BFS)
+        components = self._get_components_from_summaries(summaries)
+
+        # 3. Find peaks per component and offset global labels
+        final_labels = {}
+        global_label_offset = 0
+
+        for comp in components:
+            local_labels = self._find_cluster_centers(comp, densities, summaries, metric)
+            
+            # Map local labels to global labels so clusters from different components don't share IDs
+            for node_id, loc_label in local_labels.items():
+                final_labels[node_id] = global_label_offset + loc_label
+
+            if local_labels:
+                global_label_offset += len(set(local_labels.values()))
+
+        return final_labels
+
+
+    def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
+        """
+        map a list of node assignments (one node id per raw point) to
+        final macro-cluster labels, using predict_summaries as a lookup table.
+        The super class already implements this generic mapping; override
+        if DenSOINN needs different behaviour.
+        """
+        return super().predict_assignment(assignments, summaries)
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    def _build_metric(self, summaries: dict) -> SelfAdaptiveDistanceMetric:
+        """
+        Rebuild the same self-adaptive diagonal metric used online (Algorithm 1),
+        but from the final, frozen node centroids at clustering time.
+        """
+        centroids = np.array([data["centroid"] for data in summaries.values()], dtype=float)
+        metric = SelfAdaptiveDistanceMetric(n_dims=centroids.shape[1])
+        metric.update_from_centroids(centroids)
+        return metric
+
+    def _get_components_from_summaries(self, summaries):
+        """
+        Finds a list of components (connected nodes) from the summaries
+        each component is a list of nodes which are connected by an edge in the network. done via BFS with the neighbours of each node.
+        """
         visited = set()
         components = []
         
@@ -64,37 +116,9 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                             queue.append(nbr)
                             
                 components.append(comp)
-        
+        return components
 
-        # 3. Find peaks per component and offset global labels
-        final_labels = {}
-        global_label_offset = 0
-
-        for comp in components:
-            local_labels = self._find_cluster_centers(comp, densities, summaries)
-            
-            # Map local labels to global labels so clusters from different components don't share IDs
-            for node_id, loc_label in local_labels.items():
-                final_labels[node_id] = global_label_offset + loc_label
-
-            if local_labels:
-                global_label_offset += len(set(local_labels.values()))
-
-        return final_labels
-
-    def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
-        """
-        map a list of node assignments (one node id per raw point) to
-        final macro-cluster labels, using predict_summaries as a lookup table.
-        The super class already implements this generic mapping; override
-        if DenSOINN needs different behaviour.
-        """
-        return super().predict_assignment(assignments, summaries)
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
-    def _node_density(self, summaries: dict) -> dict:
+    def _node_density(self, summaries: dict, metric: SelfAdaptiveDistanceMetric) -> dict:
         """
         estimate the density p_i of every node.
         p_i ∝ m_i / (1 + d_i^2), where m_i is the node weight and d_i is the
@@ -112,7 +136,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 p_i = float(m_i)
             else:
                 # 1. Calculate the mean distance to topological neighbors (d_i)
-                dists = [np.linalg.norm(w_i - summaries[nbr]["centroid"]) for nbr in neighbors]
+                dists = [metric.distance(w_i, summaries[nbr]["centroid"]) for nbr in neighbors]
                 d_i = np.mean(dists)
                 
                 # 2. Apply intrinsic dimensionality (n') from the paper
@@ -122,7 +146,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             
         return densities
 
-    def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict) -> dict:
+    def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict, metric: SelfAdaptiveDistanceMetric) -> dict:
         """
         Finds density peaks within a component and cascades labels downhill.
         """
@@ -143,8 +167,12 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             w_i = summaries[i]["centroid"]
 
             # Candidates are nodes with higher density (indices 0 to k-1)
-            candidates = sorted_nodes[:k]
-            dists = [np.linalg.norm(w_i - summaries[c]["centroid"]) for c in candidates]
+            candidates = [c for c in sorted_nodes[:k] if densities[c] > densities[i]]
+            if not candidates:
+                # all higher-ranked nodes are exact density ties with i;
+                # fall back to the full higher-or-equal set
+                candidates = sorted_nodes[:k]
+            dists = [metric.distance(w_i, summaries[c]["centroid"]) for c in candidates]
 
             min_idx = np.argmin(dists)
             q_i = candidates[min_idx]
@@ -154,27 +182,22 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             h[i] = densities[i] * d_min
 
         # 3. Handle the absolute highest density node (Global Peak of component)
+        # Peak node: per the paper, h_peak = inf, so it is always a cluster center,
+        # and h_mean is computed over the remaining nodes only
         peak_node = sorted_nodes[0]
-        # Its distance is the maximum distance to any other node in the component
-        max_dist = max(np.linalg.norm(summaries[peak_node]["centroid"] - summaries[c]["centroid"]) for c in sorted_nodes[1:])
-        h[peak_node] = densities[peak_node] * max_dist
+        non_peak_nodes = sorted_nodes[1:]
 
-        # 4. Calculate threshold and assign centers
-        h_mean = np.mean(list(h.values()))
-        
-        local_labels = {}
-        current_label = 0
+        # we give the global peak its center cluster label directly
+        local_labels = {peak_node: 0}
+        current_label = 1
+        # and we exlude it form the threshold calculation
+        h_mean = np.mean([h[node] for node in non_peak_nodes])
 
-        for node in sorted_nodes:
+        for node in non_peak_nodes:
             # If peak score is high enough, it is a cluster center
             if h[node] >= self.alpha * h_mean:
                 local_labels[node] = current_label
                 current_label += 1
-
-        # Fallback: if alpha is too strict and no centers pass, force the peak to be a center
-        if not local_labels:
-            local_labels[peak_node] = 0
-            current_label = 1
 
         # 5. Cascade labels downhill
         for node in sorted_nodes:

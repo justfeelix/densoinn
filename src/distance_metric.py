@@ -32,12 +32,25 @@ class SelfAdaptiveDistanceMetric:
     def A(self) -> np.ndarray:
         """The full diagonal matrix form of the metric (for inspection)."""
         return np.diag(self.a_diag)
-
+    
     def update(self, nodes) -> None:
         """
         Algorithm 1: recompute the diagonal matrix A from the per-dimension
         min/max of all node centroids in ``nodes`` (a {id: Node} mapping or any
         iterable of Nodes).
+
+        Thin wrapper around update_from_centroids(): extracts the stacked
+        centroid matrix from Node objects, then delegates the actual
+        Algorithm 1 computation.
+        """
+        node_iter = nodes.values() if isinstance(nodes, dict) else nodes
+        W = np.array([n.w for n in node_iter], dtype=float)
+        self.update_from_centroids(W)
+
+
+    def update_from_centroids(self, W: np.ndarray) -> None:
+        """
+        Algorithm 1, operating directly on a stacked centroid matrix rather than Node objects. This is what update() delegates to, and is also the entry point for callers that already have centroids in array form (e.g. the offline phase, rebuilding A once from the final frozen network state at clustering-request time rather than from live Node objects).
 
         For each dimension i:  A_ii = 1 / (max_i - min_i)^2, or 0 if
         max_i == min_i (that feature does not vary across nodes, so it
@@ -47,9 +60,12 @@ class SelfAdaptiveDistanceMetric:
         identical), A would be all zeros and winner selection would be
         arbitrary; in that case we fall back to the identity metric for this
         round.
+
+        Parameters
+        ----------
+        W : np.ndarray, shape (n_nodes, n_dims)
+            Stacked node centroids, one row per node.
         """
-        node_iter = nodes.values() if isinstance(nodes, dict) else nodes
-        W = np.array([n.w for n in node_iter], dtype=float)
         if W.shape[0] == 0:
             return
 
