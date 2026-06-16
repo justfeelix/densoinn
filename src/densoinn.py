@@ -88,6 +88,7 @@ class DenSOINN:
             return np.full(len(X), -1)
 
         node_labels = self.offline_phase.predict_summaries(summaries)
+        metric = self.offline_phase.build_metric(summaries)
 
         node_ids = list(summaries.keys())
         centroids = np.array([summaries[nid]["centroid"] for nid in node_ids])
@@ -97,12 +98,10 @@ class DenSOINN:
         
         # We process X in a loop (or vectorized if memory permits)
         for x in X:
-            # Use the self-adaptive metric if available, otherwise Euclidean
-            if self.online_phase.metric is not None and len(centroids) > 0:
-                # The metric expects (point, stacked_centroids)
-                dists = self.online_phase.metric.distance_to_nodes(x, centroids)
-            else:
-                dists = np.linalg.norm(centroids - x, axis=1)
+            # Rebuild the final frozen metric from surviving nodes instead of
+            # reusing the last online-round metric, which may not match the
+            # post-denoising summary set.
+            dists = metric.distance_to_nodes(x, centroids)
 
             nearest_idx = np.argmin(dists)
             final_assignments.append(labels[nearest_idx])

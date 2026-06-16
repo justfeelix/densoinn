@@ -43,7 +43,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         
         # 0. Rebuild the self-adaptive metric (Algorithm 1) from the final node centroids, so offline distances stay consistent with the online phase's notion of d(x, y) 
         # instead of falling back to plain Euclidean distance on raw, unnormalized features
-        metric = self._build_metric(summaries)
+        metric = self.build_metric(summaries)
 
         # 1. Compute densities
         densities = self._node_density(summaries, metric)
@@ -88,7 +88,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         if not summaries:
             return {"components": [], "centers": set(), "labels": {}}
 
-        metric = self._build_metric(summaries)
+        metric = self.build_metric(summaries)
         densities = self._node_density(summaries, metric)
         components = self._get_components_from_summaries(summaries)
 
@@ -112,7 +112,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
     # Helpers
     # ------------------------------------------------------------------ #
 
-    def _build_metric(self, summaries: dict) -> SelfAdaptiveDistanceMetric:
+    def build_metric(self, summaries: dict) -> SelfAdaptiveDistanceMetric:
         """
         Rebuild the same self-adaptive diagonal metric used online (Algorithm 1),
         but from the final, frozen node centroids at clustering time.

@@ -123,18 +123,13 @@ def main():
             args.offline_interval > 0 and (i + 1) % args.offline_interval == 0
         )
         if run_offline:
-            labels = densoinn.predict(assignments=batch_assignments)
+            labels = densoinn.predict_points(np.array(batch))
             num_clusters = len(np.unique(np.array(labels)[np.array(labels) != -1]))
             print(f"          [Offline] clusters this batch: {num_clusters}")
             _evaluate(list(batch), list(y[start_idx:end_idx]), labels, list(timestamps))
 
-    # Final offline phase + evaluation — uses stored authoritative assignments
-    # for the full stream, no nearest-node approximation needed.
-    # TODO (paper reproduction): to match the paper, label each point by its
-    # nearest surviving node instead, i.e. replace the line below with
-    #   final_labels = densoinn.predict_points(np.array(all_X))
     print(f"\n--- Final offline clustering + evaluation ---")
-    final_labels = densoinn.predict(assignments=all_assignments)
+    final_labels = densoinn.predict_points(np.array(all_X))
     final_arr = np.array(final_labels)
     unique_clusters = np.unique(final_arr[final_arr != -1])
     print(f"    Total points: {len(all_X)}  |  clusters: {len(unique_clusters)}")

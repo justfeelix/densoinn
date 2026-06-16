@@ -1,0 +1,135 @@
+"""Objective functions that rank evaluation records without owning the run logic."""
+
+from __future__ import annotations
+
+import math
+
+from baseframework.tuning.metrics.guards import basic_clustering_guard
+from baseframework.tuning.types import EvaluationRecord, ObjectiveResult
+
+
+def make_unsupervised_objective(
+    *,
+    metric_name: str = "ts",
+    noise_penalty_weight: float = 0.25,
+    tiny_cluster_penalty_weight: float = 0.25,
+    fragmentation_penalty_weight: float = 0.5,
+    summary_penalty_weight: float = 0.0,
+    min_clusters: int = 2,
+    min_labeled_points: int = 20,
+    max_noise_frac: float = 0.98,
+):
+    """Rank candidates using label-free metrics plus structural guard rails."""
+
+    def objective(record: EvaluationRecord) -> ObjectiveResult:
+        valid, reason, details = basic_clustering_guard(
+            record,
+            min_clusters=min_clusters,
+            min_labeled_points=min_labeled_points,
+            max_noise_frac=max_noise_frac,
+        )
+        if not valid:
+            return ObjectiveResult(
+                name="unsupervised",
+                score=float("-inf"),
+                valid=False,
+                reason=reason,
+                details=details,
+            )
+
+        base_metric = float(record.internal_metrics.get(metric_name, float("nan")))
+        if math.isnan(base_metric):
+            return ObjectiveResult(
+                name="unsupervised",
+                score=float("-inf"),
+                valid=False,
+                reason=f"missing internal metric: {metric_name}",
+                details=details,
+            )
+
+        noise_penalty = noise_penalty_weight * float(record.diagnostics.get("noise_frac", 0.0))
+        tiny_penalty = tiny_cluster_penalty_weight * float(record.diagnostics.get("tiny_cluster_point_frac", 0.0))
+        n_clusters = int(record.diagnostics.get("n_clusters", 0))
+        n_components = int(record.diagnostics.get("n_summary_components", 0))
+        n_summaries = int(record.diagnostics.get("n_summaries", 0))
+        if n_summaries > n_components:
+            fragmentation_excess = max(n_clusters - n_components, 0) / max(n_summaries - n_components, 1)
+        else:
+            fragmentation_excess = 0.0
+        fragmentation_penalty = fragmentation_penalty_weight * fragmentation_excess
+        summary_penalty = summary_penalty_weight * float(record.diagnostics.get("summary_ratio", 0.0))
+        score = base_metric - noise_penalty - tiny_penalty - fragmentation_penalty - summary_penalty
+
+        return ObjectiveResult(
+            name="unsupervised",
+            score=score,
+            valid=True,
+            reason="ok",
+            details={
+                "base_metric": base_metric,
+                "noise_penalty": noise_penalty,
+                "tiny_cluster_penalty": tiny_penalty,
+                "fragmentation_penalty": fragmentation_penalty,
+                "fragmentation_excess": fragmentation_excess,
+                "summary_penalty": summary_penalty,
+                **details,
+            },
+        )
+
+    return objective
+
+
+def make_supervised_objective(
+    *,
+    metric_name: str = "cmm",
+    count_penalty_weight: float = 0.5,
+    min_clusters: int = 2,
+    min_labeled_points: int = 20,
+    max_noise_frac: float = 0.98,
+):
+    """Reproduce the label-aware selection logic, but keep it optional."""
+
+    def objective(record: EvaluationRecord) -> ObjectiveResult:
+        valid, reason, details = basic_clustering_guard(
+            record,
+            min_clusters=min_clusters,
+            min_labeled_points=min_labeled_points,
+            max_noise_frac=max_noise_frac,
+        )
+        if not valid:
+            return ObjectiveResult(
+                name="supervised",
+                score=float("-inf"),
+                valid=False,
+                reason=reason,
+                details=details,
+            )
+
+        base_metric = float(record.external_metrics.get(metric_name, float("nan")))
+        true_k = int(record.external_metrics.get("true_k", 0))
+        n_clusters = int(record.diagnostics.get("n_clusters", 0))
+        if math.isnan(base_metric) or true_k <= 0:
+            return ObjectiveResult(
+                name="supervised",
+                score=float("-inf"),
+                valid=False,
+                reason=f"missing external metric: {metric_name}",
+                details=details,
+            )
+
+        count_penalty = count_penalty_weight * abs(n_clusters - true_k) / max(true_k, 1)
+        score = base_metric - count_penalty
+        return ObjectiveResult(
+            name="supervised",
+            score=score,
+            valid=True,
+            reason="ok",
+            details={
+                "base_metric": base_metric,
+                "count_penalty": count_penalty,
+                "true_k": float(true_k),
+                **details,
+            },
+        )
+
+    return objective
