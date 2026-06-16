@@ -37,7 +37,7 @@ class ObjectiveResult:
     score: float
     valid: bool
     reason: str
-    details: dict[str, float] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ class SearchResult:
     score: float
     valid: bool
     reason: str
-    objective_details: dict[str, float] = field(default_factory=dict)
+    objective_details: dict[str, Any] = field(default_factory=dict)
     internal_metrics: dict[str, float] = field(default_factory=dict)
     external_metrics: dict[str, float] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -70,4 +70,22 @@ class SearchResult:
             internal_metrics=dict(evaluation.internal_metrics),
             external_metrics=dict(evaluation.external_metrics),
             diagnostics=dict(evaluation.diagnostics),
+        )
+
+    @classmethod
+    def from_failure(
+        cls,
+        *,
+        params: dict[str, Any],
+        reason: str,
+        error: str | None = None,
+    ) -> "SearchResult":
+        details = {"error": error} if error is not None else {}
+        return cls(
+            params=dict(params),
+            objective_name="error",
+            score=float("-inf"),
+            valid=False,
+            reason=reason,
+            objective_details=details,
         )

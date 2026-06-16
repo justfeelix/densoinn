@@ -36,18 +36,24 @@ def iter_batches(
 
 
 def reconstruct_point_labels(
-    densoinn: DenSOINN,
     X: np.ndarray,
-    assignments: list[int],
+    summaries: dict[int, dict[str, Any]],
+    node_labels: dict[int, int],
     *,
+    metric=None,
+    assignments: list[int] | None = None,
     label_mode: str = "nearest_survivor",
 ) -> list[int]:
-    """Reconstruct one final cluster label per point using the chosen strategy."""
+    """Reconstruct one final cluster label per point using the chosen strategy.
+
+    ``summary_lookup`` is kept for debugging but is not suitable as the normal
+    final-label path because denoising can delete assigned summaries.
+    """
 
     if label_mode == "nearest_survivor":
-        return list(map(int, densoinn.predict_points(np.asarray(X))))
+        return _label_points_by_nearest_survivor(X, summaries, node_labels, metric=metric)
     if label_mode == "summary_lookup":
-        return list(map(int, densoinn.predict(assignments=assignments)))
+        return _label_points_by_summary_lookup(assignments or [], node_labels)
     raise ValueError(f"unsupported label_mode: {label_mode}")
 
 
@@ -87,11 +93,14 @@ def run_stream(
             on_batch(batch_index, batch, timestamps, densoinn, assignments)
 
     summaries = densoinn.online_phase.get_summary()
-    node_labels = densoinn.predict()
+    node_labels = densoinn.offline_phase.predict_summaries(summaries)
+    metric = densoinn.offline_phase.build_metric(summaries) if summaries else None
     point_labels = reconstruct_point_labels(
-        densoinn,
         X,
-        assignments,
+        summaries,
+        node_labels,
+        metric=metric,
+        assignments=assignments,
         label_mode=label_mode,
     )
     runtime_sec = perf_counter() - started
@@ -189,6 +198,34 @@ def _run_metric_bundle(
     for name, metric_fn in (metric_fns or {}).items():
         metrics[name] = float(metric_fn(X, y, artifacts))
     return metrics
+
+
+def _label_points_by_nearest_survivor(
+    X: np.ndarray,
+    summaries: dict[int, dict[str, Any]],
+    node_labels: dict[int, int],
+    *,
+    metric,
+) -> list[int]:
+    if not summaries:
+        return [-1] * len(X)
+
+    node_ids = list(summaries)
+    centroids = np.asarray([summaries[node_id]["centroid"] for node_id in node_ids], dtype=float)
+    labels = np.asarray([node_labels.get(node_id, -1) for node_id in node_ids], dtype=int)
+
+    final_labels = []
+    for point in np.asarray(X):
+        dists = metric.distance_to_nodes(point, centroids)
+        final_labels.append(int(labels[int(np.argmin(dists))]))
+    return final_labels
+
+
+def _label_points_by_summary_lookup(
+    assignments: list[int],
+    node_labels: dict[int, int],
+) -> list[int]:
+    return [int(node_labels.get(assignment, -1)) for assignment in assignments]
 
 
 def _collect_diagnostics(

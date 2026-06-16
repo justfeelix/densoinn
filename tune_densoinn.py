@@ -5,8 +5,8 @@ Supports two ranking modes:
   - unsupervised: tune on internal, label-free metrics only
   - supervised:   reproduce the old label-aware selection as a benchmark
 
-Ground-truth labels are still loaded for validation metrics in both modes,
-but they influence ranking only in ``--objective supervised``.
+Ground-truth labels stay out of unsupervised runs unless they are explicitly
+requested for validation-only reporting.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random search")
     parser.add_argument("--batch_size", type=int, default=500)
     parser.add_argument("--points_per_timestep", type=int, default=1)
-    parser.add_argument("--label_mode", choices=["nearest_survivor", "summary_lookup"], default="nearest_survivor")
     parser.add_argument("--max_nodes", type=int, default=1000)
     parser.add_argument("--intrinsic_dim", type=int, default=2)
     parser.add_argument("--grid_gamma", type=float, default=0.25, help="Gamma held fixed during 2-D grid search")
@@ -60,6 +59,16 @@ def main():
     parser.add_argument("--ts_kn", type=int, default=200)
     parser.add_argument("--ts_c", type=float, default=1.0)
     parser.add_argument("--cmm_k", type=int, default=5)
+    parser.add_argument(
+        "--with_validation_metrics",
+        action="store_true",
+        help="Also compute external metrics during unsupervised search for reporting only",
+    )
+    parser.add_argument(
+        "--fail_fast",
+        action="store_true",
+        help="Abort the search immediately if one candidate evaluation fails",
+    )
     parser.add_argument("--plot_dir", default=None)
     args = parser.parse_args()
 
@@ -68,21 +77,21 @@ def main():
     os.makedirs(args.plot_dir, exist_ok=True)
 
     print(f"Loading data '{args.dataset}'...")
-    X, y = load_data(args.dataset, scale=not args.raw)
+    need_labels = args.objective == "supervised" or args.with_validation_metrics
+    X, y = load_data(args.dataset, scale=not args.raw, include_labels=need_labels)
 
     internal_metric_fns = make_internal_metric_bundle(
         ts_window=args.ts_window,
         ts_kn=args.ts_kn,
         ts_c=args.ts_c,
     )
-    external_metric_fns = make_external_metric_bundle(cmm_k=args.cmm_k)
+    external_metric_fns = make_external_metric_bundle(cmm_k=args.cmm_k) if need_labels else None
     evaluator = partial(
         evaluate_params,
         X,
         y,
         batch_size=args.batch_size,
         points_per_timestep=args.points_per_timestep,
-        label_mode=args.label_mode,
         internal_metric_fns=internal_metric_fns,
         external_metric_fns=external_metric_fns,
         return_artifacts=False,
@@ -93,7 +102,7 @@ def main():
         "intrinsic_dim": args.intrinsic_dim,
     }
     objective = _build_objective(args)
-    reporter = _build_reporter(args.objective)
+    reporter = _build_reporter(args.objective, include_external=need_labels)
 
     if args.method == "grid":
         param_grid = {
@@ -110,7 +119,14 @@ def main():
             f"{len(candidates)} configs with gamma={args.grid_gamma} and "
             f"stream_speed={args.grid_stream_speed}\n"
         )
-        results = run_search(evaluator, objective, candidates, fixed=fixed, reporter=reporter)
+        results = run_search(
+            evaluator,
+            objective,
+            candidates,
+            fixed=fixed,
+            reporter=reporter,
+            fail_fast=args.fail_fast,
+        )
 
         xs, ys, matrix = grid_matrix(results, "alpha", "epsilon", metric="score")
         print_matrix(xs, ys, matrix, "alpha", "epsilon", "score")
@@ -127,7 +143,14 @@ def main():
     elif args.method == "random":
         print(f"\nRANDOM SEARCH on '{args.dataset}' ({args.objective} objective): {args.n_iter} configs\n")
         candidates = random_candidates(_param_space(), args.n_iter, seed=args.seed)
-        results = run_search(evaluator, objective, candidates, fixed=fixed, reporter=reporter)
+        results = run_search(
+            evaluator,
+            objective,
+            candidates,
+            fixed=fixed,
+            reporter=reporter,
+            fail_fast=args.fail_fast,
+        )
     else:
         print(
             f"\nREFINED step 1/2: RANDOM SEARCH on '{args.dataset}' "
@@ -139,6 +162,7 @@ def main():
             random_candidates(_param_space(), args.n_iter, seed=args.seed),
             fixed=fixed,
             reporter=reporter,
+            fail_fast=args.fail_fast,
         )
         try:
             param_grid = refined_grid_from_topk(random_results, top_k=5, int_params={"stream_speed"})
@@ -148,7 +172,14 @@ def main():
 
         print(f"\nREFINED step 2/2: 4-D GRID on '{args.dataset}' with ranges {param_grid}\n")
         candidates = list(grid_candidates(param_grid))
-        results = run_search(evaluator, objective, candidates, fixed=fixed, reporter=reporter)
+        results = run_search(
+            evaluator,
+            objective,
+            candidates,
+            fixed=fixed,
+            reporter=reporter,
+            fail_fast=args.fail_fast,
+        )
 
         xs, ys, matrix = grid_matrix_marginalized(results, "alpha", "epsilon", metric="score")
         print_matrix(xs, ys, matrix, "alpha", "epsilon", "best score (max over gamma, stream_speed)")
@@ -164,7 +195,10 @@ def main():
         )
 
     csv_path = write_results_csv(results, os.path.join(args.plot_dir, "results.csv"))
-    print_top(results, n=5, extra_metrics=["internal.ts", "external.cmm", "diagnostics.n_clusters"])
+    top_metrics = ["internal.ts", "diagnostics.n_clusters"]
+    if need_labels:
+        top_metrics.insert(1, "external.cmm")
+    print_top(results, n=5, extra_metrics=top_metrics)
     print(f"\nSaved ranked results to {csv_path}")
 
 
@@ -188,9 +222,9 @@ def _build_objective(args):
     )
 
 
-def _build_reporter(objective_name: str):
+def _build_reporter(objective_name: str, *, include_external: bool):
     extra_metrics = ["internal.ts", "diagnostics.n_clusters", "diagnostics.noise_frac"]
-    if objective_name == "supervised":
+    if objective_name == "supervised" or include_external:
         extra_metrics.append("external.cmm")
 
     def reporter(result):

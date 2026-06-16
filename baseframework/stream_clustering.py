@@ -96,6 +96,5 @@ class OfflinePhase_Clusterer:
     def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
         summary_clustering = self.predict_summaries(summaries)
         summary_clustering[-1] = -1
-        return [summary_clustering[a] for a in assignments]
-
+        return [summary_clustering.get(a, -1) for a in assignments]
 

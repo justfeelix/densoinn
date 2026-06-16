@@ -31,7 +31,6 @@ def main():
     parser.add_argument("--raw", action="store_true", help="Disable min-max scaling before streaming")
     parser.add_argument("--batch_size", type=int, default=500)
     parser.add_argument("--points_per_timestep", type=int, default=1)
-    parser.add_argument("--label_mode", choices=["nearest_survivor", "summary_lookup"], default="nearest_survivor")
     parser.add_argument("--results_csv", default=None, help="Optional tuning CSV to load params from")
     parser.add_argument("--rank", type=int, default=1, help="1-based row rank when loading from results CSV")
     parser.add_argument("--gamma", type=float, default=0.25)
@@ -67,7 +66,6 @@ def main():
         y,
         batch_size=args.batch_size,
         points_per_timestep=args.points_per_timestep,
-        label_mode=args.label_mode,
         internal_metric_fns=make_internal_metric_bundle(
             ts_window=args.ts_window,
             ts_kn=args.ts_kn,
