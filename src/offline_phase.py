@@ -61,27 +61,8 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         # 1. Compute densities
         densities = self._node_density(summaries)
 
-        # 2. Split into Connected Components (BFS)
-        visited = set()
-        components = []
-
-        for node in summaries:
-            if node not in visited:
-                comp = []
-                queue = [node]
-                visited.add(node)
-
-                while queue:
-                    curr = queue.pop(0)
-                    comp.append(curr)
-
-                    # Iterate through the topological neighbors provided in the summary dict
-                    for nbr in summaries[curr]["neighbors"]:
-                        if nbr not in visited and nbr in summaries:
-                            visited.add(nbr)
-                            queue.append(nbr)
-
-                components.append(comp)
+        # 2. Split into connected components
+        components = self._connected_components(summaries)
 
         # 3. Find peaks per component and offset global labels
         final_labels = {}
@@ -101,6 +82,42 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 global_label_offset += len(set(local_labels.values()))
 
         return final_labels, centers
+
+    def predict_components(self, summaries: dict) -> dict:
+        """
+        Just the "cut the network into connected components" step.
+
+        Returns {node_id: component_id}, a component_id per weakly connected
+        subgraph. This is a *coarser* partition than predict_summaries(): the
+        density-peak step may later split one component into several clusters,
+        but a cluster never spans two components.
+        """
+        comps = self._connected_components(summaries)
+        out: dict = {}
+        for comp_id, comp in enumerate(comps):
+            for node_id in comp:
+                out[node_id] = comp_id
+        return out
+
+    def _connected_components(self, summaries: dict) -> list:
+        """Weakly connected components over the node-neighbour graph (BFS)."""
+        visited = set()
+        components = []
+        for node in summaries:
+            if node not in visited:
+                comp = []
+                queue = [node]
+                visited.add(node)
+                while queue:
+                    curr = queue.pop(0)
+                    comp.append(curr)
+                    # Topological neighbours provided in the summary dict.
+                    for nbr in summaries[curr]["neighbors"]:
+                        if nbr not in visited and nbr in summaries:
+                            visited.add(nbr)
+                            queue.append(nbr)
+                components.append(comp)
+        return components
 
     def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
         """
@@ -126,7 +143,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             m_i = data["weight"]
             w_i = data["centroid"]
             neighbors = data["neighbors"]
-
+            
             if not neighbors:
                 # Isolated node
                 p_i = float(m_i)
@@ -134,12 +151,12 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 # 1. Calculate the mean distance to topological neighbors (d_i)
                 dists = [np.linalg.norm(w_i - summaries[nbr]["centroid"]) for nbr in neighbors]
                 d_i = np.mean(dists)
-
+                
                 # 2. Apply intrinsic dimensionality (n') from the paper
                 p_i = m_i / (1.0 + (d_i ** self.intrinsic_dim))
-
+                
             densities[node_id] = p_i
-
+            
         return densities
 
     def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict) -> tuple[dict, list]:
@@ -149,9 +166,9 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         Returns (local_labels, local_centers): the per-node label map and the
         list of node ids that were chosen as cluster centers (density peaks).
         """
-        if not component:
+        if not component: 
             return {}, []
-        if len(component) == 1:
+        if len(component) == 1: 
             return {component[0]: 0}, [component[0]]  # single node is its own center
 
         # 1. Sort nodes by density descending
@@ -184,7 +201,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
 
         # 4. Calculate threshold and assign centers
         h_mean = np.mean(list(h.values()))
-
+        
         local_labels = {}
         local_centers: list = []
         current_label = 0
