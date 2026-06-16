@@ -37,8 +37,26 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         """
         # input:  dict of node summaries (centroid, weight, neighbors)
         # output: dict mapping node_id -> final cluster label
+        labels, _ = self.predict_summaries_with_centers(summaries)
+        return labels
+
+    def predict_summaries_with_centers(self, summaries: dict) -> tuple[dict, list]:
+        """
+        Same clustering as predict_summaries(), but also returns the cluster
+        centers (the density peaks chosen as macro-cluster seeds).
+
+        Returns
+        -------
+        (labels, centers)
+            labels  : {node_id: macro_cluster_label}
+            centers : list of node_ids that were chosen as cluster centers,
+                      one per macro cluster. These are the highlighted nodes in
+                      step (c) "Finding cluster centers" of the paper; the
+                      remaining nodes are then labelled by their nearest
+                      higher-density center, giving step (d).
+        """
         if not summaries:
-            return {}
+            return {}, []
 
         # 1. Compute densities
         densities = self._node_density(summaries)
@@ -46,41 +64,43 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         # 2. Split into Connected Components (BFS)
         visited = set()
         components = []
-        
+
         for node in summaries:
             if node not in visited:
                 comp = []
                 queue = [node]
                 visited.add(node)
-                
+
                 while queue:
                     curr = queue.pop(0)
                     comp.append(curr)
-                    
+
                     # Iterate through the topological neighbors provided in the summary dict
                     for nbr in summaries[curr]["neighbors"]:
                         if nbr not in visited and nbr in summaries:
                             visited.add(nbr)
                             queue.append(nbr)
-                            
+
                 components.append(comp)
-        
 
         # 3. Find peaks per component and offset global labels
         final_labels = {}
+        centers: list = []
         global_label_offset = 0
 
         for comp in components:
-            local_labels = self._find_cluster_centers(comp, densities, summaries)
-            
+            local_labels, local_centers = self._find_cluster_centers(comp, densities, summaries)
+
             # Map local labels to global labels so clusters from different components don't share IDs
             for node_id, loc_label in local_labels.items():
                 final_labels[node_id] = global_label_offset + loc_label
 
+            centers.extend(local_centers)
+
             if local_labels:
                 global_label_offset += len(set(local_labels.values()))
 
-        return final_labels
+        return final_labels, centers
 
     def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
         """
@@ -106,7 +126,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             m_i = data["weight"]
             w_i = data["centroid"]
             neighbors = data["neighbors"]
-            
+
             if not neighbors:
                 # Isolated node
                 p_i = float(m_i)
@@ -114,22 +134,25 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 # 1. Calculate the mean distance to topological neighbors (d_i)
                 dists = [np.linalg.norm(w_i - summaries[nbr]["centroid"]) for nbr in neighbors]
                 d_i = np.mean(dists)
-                
+
                 # 2. Apply intrinsic dimensionality (n') from the paper
                 p_i = m_i / (1.0 + (d_i ** self.intrinsic_dim))
-                
+
             densities[node_id] = p_i
-            
+
         return densities
 
-    def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict) -> dict:
+    def _find_cluster_centers(self, component: list[int], densities: dict, summaries: dict) -> tuple[dict, list]:
         """
         Finds density peaks within a component and cascades labels downhill.
+
+        Returns (local_labels, local_centers): the per-node label map and the
+        list of node ids that were chosen as cluster centers (density peaks).
         """
-        if not component: 
-            return {}
-        if len(component) == 1: 
-            return {component[0]: 0} # Only one node, it's its own center
+        if not component:
+            return {}, []
+        if len(component) == 1:
+            return {component[0]: 0}, [component[0]]  # single node is its own center
 
         # 1. Sort nodes by density descending
         sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
@@ -161,19 +184,22 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
 
         # 4. Calculate threshold and assign centers
         h_mean = np.mean(list(h.values()))
-        
+
         local_labels = {}
+        local_centers: list = []
         current_label = 0
 
         for node in sorted_nodes:
             # If peak score is high enough, it is a cluster center
             if h[node] >= self.alpha * h_mean:
                 local_labels[node] = current_label
+                local_centers.append(node)
                 current_label += 1
 
         # Fallback: if alpha is too strict and no centers pass, force the peak to be a center
         if not local_labels:
             local_labels[peak_node] = 0
+            local_centers.append(peak_node)
             current_label = 1
 
         # 5. Cascade labels downhill
@@ -182,4 +208,4 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 # Inherit the label from the nearest higher density node (moving uphill)
                 local_labels[node] = local_labels[q[node]]
 
-        return local_labels
+        return local_labels, local_centers
