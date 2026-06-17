@@ -14,6 +14,7 @@ from src.densoinn import DenSOINN
 
 
 MetricFn = Callable[[np.ndarray, np.ndarray | None, RunArtifacts], float]
+DEFAULT_CLUSTER_MARGIN_SAMPLE_SIZE = 1000
 
 
 def iter_batches(
@@ -93,8 +94,9 @@ def run_stream(
             on_batch(batch_index, batch, timestamps, densoinn, assignments)
 
     summaries = densoinn.online_phase.get_summary()
-    node_labels = densoinn.offline_phase.predict_summaries(summaries)
-    metric = densoinn.offline_phase.build_metric(summaries) if summaries else None
+    offline_summary = densoinn.offline_phase.summarize_clustering(summaries)
+    node_labels = offline_summary["labels"]
+    metric = offline_summary.get("metric")
     point_labels = reconstruct_point_labels(
         X,
         summaries,
@@ -111,6 +113,7 @@ def run_stream(
         summaries=summaries,
         node_labels=node_labels,
         point_labels=point_labels,
+        offline_summary=offline_summary,
         diagnostics={
             "runtime_sec": runtime_sec,
             "label_mode": label_mode,
@@ -152,9 +155,12 @@ def evaluate_params(
     )
 
     diagnostics = _collect_diagnostics(
+        X=np.asarray(X),
         labels=np.asarray(artifacts.point_labels, dtype=int),
         summaries=artifacts.summaries,
+        node_labels=artifacts.node_labels,
         assignments=artifacts.assignments,
+        offline_summary=artifacts.offline_summary,
     )
     diagnostics.update(artifacts.diagnostics)
 
@@ -230,10 +236,14 @@ def _label_points_by_summary_lookup(
 
 def _collect_diagnostics(
     *,
+    X: np.ndarray,
     labels: np.ndarray,
     summaries: dict[int, dict[str, Any]],
+    node_labels: dict[int, int],
     assignments: list[int],
+    offline_summary: dict[str, Any],
     tiny_cluster_size: int = 5,
+    cluster_margin_sample_size: int = DEFAULT_CLUSTER_MARGIN_SAMPLE_SIZE,
 ) -> dict[str, float]:
     n_points = int(len(labels))
     noise_mask = labels == -1
@@ -244,6 +254,17 @@ def _collect_diagnostics(
     n_singletons = int(np.sum(cluster_sizes == 1)) if len(cluster_sizes) else 0
     n_tiny = int(np.sum(cluster_sizes < tiny_cluster_size)) if len(cluster_sizes) else 0
     tiny_points = int(sum(size for size in cluster_sizes if size < tiny_cluster_size))
+    cluster_margin = _cluster_assignment_margin(
+        X=X,
+        point_labels=labels,
+        summaries=summaries,
+        node_labels=node_labels,
+        metric=offline_summary.get("metric"),
+        sample_size=cluster_margin_sample_size,
+    )
+    peak_confidence = _peak_center_confidence(
+        selected_center_margins=offline_summary.get("selected_center_margins", []),
+    )
 
     return {
         "n_points": n_points,
@@ -263,7 +284,63 @@ def _collect_diagnostics(
         "n_tiny_clusters": n_tiny,
         "tiny_cluster_frac": float(n_tiny / max(len(unique_clusters), 1)) if len(unique_clusters) else 0.0,
         "tiny_cluster_point_frac": float(tiny_points / max(int(np.sum(~noise_mask)), 1)) if len(non_noise) else 0.0,
+        "cluster_margin": cluster_margin,
+        "peak_confidence": peak_confidence,
     }
+
+
+def _cluster_assignment_margin(
+    *,
+    X: np.ndarray,
+    point_labels: np.ndarray,
+    summaries: dict[int, dict[str, Any]],
+    node_labels: dict[int, int],
+    metric,
+    sample_size: int | None = DEFAULT_CLUSTER_MARGIN_SAMPLE_SIZE,
+) -> float:
+    if metric is None or not summaries:
+        return float("nan")
+
+    mask = point_labels != -1
+    if not np.any(mask):
+        return float("nan")
+
+    node_ids = list(summaries)
+    centroids = np.asarray([summaries[node_id]["centroid"] for node_id in node_ids], dtype=float)
+    summary_cluster_labels = np.asarray([node_labels.get(node_id, -1) for node_id in node_ids], dtype=int)
+    if len(np.unique(summary_cluster_labels[summary_cluster_labels != -1])) < 2:
+        return float("nan")
+
+    points = np.asarray(X)[mask]
+    labels = point_labels[mask]
+    if sample_size is not None and sample_size > 0 and len(points) > sample_size:
+        sample_indices = np.linspace(0, len(points) - 1, sample_size, dtype=int)
+        points = points[sample_indices]
+        labels = labels[sample_indices]
+
+    margins: list[float] = []
+    for point, cluster_label in zip(points, labels):
+        own_mask = summary_cluster_labels == cluster_label
+        other_mask = (summary_cluster_labels != cluster_label) & (summary_cluster_labels != -1)
+        if not np.any(own_mask) or not np.any(other_mask):
+            continue
+
+        dists = metric.distance_to_nodes(point, centroids)
+        d_own = float(np.min(dists[own_mask]))
+        d_other = float(np.min(dists[other_mask]))
+        margin = (d_other - d_own) / max(d_other, 1e-12)
+        margins.append(float(np.clip(margin, 0.0, 1.0)))
+
+    return float(np.mean(margins)) if margins else float("nan")
+
+
+def _peak_center_confidence(
+    *,
+    selected_center_margins: list[float],
+) -> float:
+    if selected_center_margins:
+        return float(np.mean(selected_center_margins))
+    return float("nan")
 
 
 def _count_components(summaries: dict[int, dict[str, Any]]) -> int:

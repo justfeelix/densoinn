@@ -22,7 +22,11 @@ from functools import partial
 from baseframework.datahandler import load_data
 from baseframework.tuning.engine import run_search
 from baseframework.tuning.metrics import make_external_metric_bundle, make_internal_metric_bundle
-from baseframework.tuning.objectives import make_supervised_objective, make_unsupervised_objective
+from baseframework.tuning.objectives import (
+    make_supervised_objective,
+    make_unsupervised_objective,
+    make_unsupervised_v2_objective,
+)
 from baseframework.tuning.reporting import (
     format_search_result,
     grid_matrix,
@@ -41,7 +45,11 @@ def main():
     parser.add_argument("--dataset", default="complex9", help="Dataset name")
     parser.add_argument("--raw", action="store_true", help="Disable min-max scaling before streaming")
     parser.add_argument("--method", choices=["grid", "random", "refined"], default="grid")
-    parser.add_argument("--objective", choices=["unsupervised", "supervised"], default="unsupervised")
+    parser.add_argument(
+        "--objective",
+        choices=["unsupervised", "unsupervised_v2", "supervised"],
+        default="unsupervised",
+    )
     parser.add_argument("--n_iter", type=int, default=30, help="Number of random samples")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random search")
     parser.add_argument("--batch_size", type=int, default=500)
@@ -55,6 +63,11 @@ def main():
     parser.add_argument("--tiny_cluster_penalty_weight", type=float, default=0.25)
     parser.add_argument("--fragmentation_penalty_weight", type=float, default=0.5)
     parser.add_argument("--summary_penalty_weight", type=float, default=0.0)
+    parser.add_argument("--v2_ts_weight", type=float, default=0.35)
+    parser.add_argument("--v2_coverage_weight", type=float, default=0.20)
+    parser.add_argument("--v2_cluster_margin_weight", type=float, default=0.25)
+    parser.add_argument("--v2_peak_confidence_weight", type=float, default=0.20)
+    parser.add_argument("--v2_summary_ratio_penalty_weight", type=float, default=0.20)
     parser.add_argument("--ts_window", type=int, default=200)
     parser.add_argument("--ts_kn", type=int, default=200)
     parser.add_argument("--ts_c", type=float, default=1.0)
@@ -195,7 +208,17 @@ def main():
         )
 
     csv_path = write_results_csv(results, os.path.join(args.plot_dir, "results.csv"))
-    top_metrics = ["internal.ts", "diagnostics.n_clusters"]
+    if args.objective == "unsupervised_v2":
+        top_metrics = [
+            "internal.ts",
+            "diagnostics.labeled_frac",
+            "diagnostics.cluster_margin",
+            "diagnostics.peak_confidence",
+            "diagnostics.summary_ratio",
+            "diagnostics.n_clusters",
+        ]
+    else:
+        top_metrics = ["internal.ts", "diagnostics.n_clusters"]
     if need_labels:
         top_metrics.insert(1, "external.cmm")
     print_top(results, n=5, extra_metrics=top_metrics)
@@ -214,6 +237,14 @@ def _param_space():
 def _build_objective(args):
     if args.objective == "supervised":
         return make_supervised_objective(count_penalty_weight=args.count_penalty_weight)
+    if args.objective == "unsupervised_v2":
+        return make_unsupervised_v2_objective(
+            ts_weight=args.v2_ts_weight,
+            coverage_weight=args.v2_coverage_weight,
+            cluster_margin_weight=args.v2_cluster_margin_weight,
+            peak_confidence_weight=args.v2_peak_confidence_weight,
+            summary_ratio_penalty_weight=args.v2_summary_ratio_penalty_weight,
+        )
     return make_unsupervised_objective(
         noise_penalty_weight=args.noise_penalty_weight,
         tiny_cluster_penalty_weight=args.tiny_cluster_penalty_weight,
@@ -223,7 +254,18 @@ def _build_objective(args):
 
 
 def _build_reporter(objective_name: str, *, include_external: bool):
-    extra_metrics = ["internal.ts", "diagnostics.n_clusters", "diagnostics.noise_frac"]
+    if objective_name == "unsupervised_v2":
+        extra_metrics = [
+            "internal.ts",
+            "diagnostics.labeled_frac",
+            "diagnostics.cluster_margin",
+            "diagnostics.peak_confidence",
+            "diagnostics.summary_ratio",
+            "diagnostics.n_clusters",
+            "diagnostics.noise_frac",
+        ]
+    else:
+        extra_metrics = ["internal.ts", "diagnostics.n_clusters", "diagnostics.noise_frac"]
     if objective_name == "supervised" or include_external:
         extra_metrics.append("external.cmm")
 

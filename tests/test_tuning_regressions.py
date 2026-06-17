@@ -11,8 +11,9 @@ if str(ROOT) not in sys.path:
 from baseframework.datahandler import load_data
 from baseframework.stream_clustering import OfflinePhase_Clusterer
 from baseframework.tuning.engine import run_search
+from baseframework.tuning.objectives import make_unsupervised_v2_objective
 from baseframework.tuning.types import EvaluationRecord, ObjectiveResult
-from src.eval.densoinn_eval import reconstruct_point_labels
+from src.eval.densoinn_eval import evaluate_params, reconstruct_point_labels
 
 
 class _DummyOfflinePhase(OfflinePhase_Clusterer):
@@ -78,6 +79,76 @@ class TuningRegressionTests(unittest.TestCase):
         X, y = load_data("complex9", batch=1, batch_max=8, scale=False, include_labels=False)
         self.assertEqual(len(X), 8)
         self.assertIsNone(y)
+
+    def test_unsupervised_v2_aggregates_expected_terms(self):
+        record = EvaluationRecord(
+            params={},
+            internal_metrics={"ts": 0.4},
+            diagnostics={
+                "n_clusters": 3,
+                "n_points": 100,
+                "noise_frac": 0.1,
+                "labeled_frac": 0.9,
+                "cluster_margin": 0.75,
+                "peak_confidence": 0.5,
+                "summary_ratio": 0.25,
+            },
+        )
+
+        result = make_unsupervised_v2_objective()(record)
+
+        self.assertTrue(result.valid)
+        self.assertAlmostEqual(result.score, 0.6625)
+        self.assertAlmostEqual(result.details["ts_term"], 0.7)
+        self.assertAlmostEqual(result.details["coverage_term"], 0.9)
+        self.assertAlmostEqual(result.details["cluster_margin_term"], 0.75)
+        self.assertAlmostEqual(result.details["peak_confidence_term"], 0.5)
+        self.assertAlmostEqual(result.details["summary_penalty"], 0.05)
+
+    def test_unsupervised_v2_omits_missing_peak_confidence_term(self):
+        record = EvaluationRecord(
+            params={},
+            internal_metrics={"ts": 0.4},
+            diagnostics={
+                "n_clusters": 3,
+                "n_points": 100,
+                "noise_frac": 0.1,
+                "labeled_frac": 0.9,
+                "cluster_margin": 0.75,
+                "peak_confidence": float("nan"),
+                "summary_ratio": 0.25,
+            },
+        )
+
+        result = make_unsupervised_v2_objective()(record)
+
+        self.assertTrue(result.valid)
+        self.assertAlmostEqual(result.score, 0.715625)
+        self.assertTrue(np.isnan(result.details["peak_confidence_term"]))
+        self.assertAlmostEqual(result.details["active_weight"], 0.8)
+
+    def test_evaluate_params_exposes_unsupervised_v2_diagnostics(self):
+        X, y = load_data("complex9", scale=False, include_labels=False)
+        record = evaluate_params(
+            X,
+            y,
+            gamma=0.25,
+            stream_speed=200,
+            epsilon=0.5,
+            max_nodes=1000,
+            alpha=5.0,
+            intrinsic_dim=2,
+            internal_metric_fns=None,
+            external_metric_fns=None,
+            return_artifacts=False,
+        )
+
+        self.assertIn("cluster_margin", record.diagnostics)
+        self.assertIn("peak_confidence", record.diagnostics)
+        self.assertGreaterEqual(record.diagnostics["cluster_margin"], 0.0)
+        self.assertLessEqual(record.diagnostics["cluster_margin"], 1.0)
+        peak_confidence = record.diagnostics["peak_confidence"]
+        self.assertTrue(np.isnan(peak_confidence) or 0.0 <= peak_confidence <= 1.0)
 
 
 if __name__ == "__main__":

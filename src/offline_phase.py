@@ -36,36 +36,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         """
         Clusters the network nodes and returns {node_id: macro_cluster_label}
         """
-        # input:  dict of node summaries (centroid, weight, neighbors)
-        # output: dict mapping node_id -> final cluster label
-        if not summaries:
-            return {}
-        
-        # 0. Rebuild the self-adaptive metric (Algorithm 1) from the final node centroids, so offline distances stay consistent with the online phase's notion of d(x, y) 
-        # instead of falling back to plain Euclidean distance on raw, unnormalized features
-        metric = self.build_metric(summaries)
-
-        # 1. Compute densities
-        densities = self._node_density(summaries, metric)
-
-        # 2. Split network into Connected Components (BFS)
-        components = self._get_components_from_summaries(summaries)
-
-        # 3. Find peaks per component and offset global labels
-        final_labels = {}
-        global_label_offset = 0
-
-        for comp in components:
-            local_labels = self._find_cluster_centers(comp, densities, summaries, metric)
-            
-            # Map local labels to global labels so clusters from different components don't share IDs
-            for node_id, loc_label in local_labels.items():
-                final_labels[node_id] = global_label_offset + loc_label
-
-            if local_labels:
-                global_label_offset += len(set(local_labels.values()))
-
-        return final_labels
+        return self.summarize_clustering(summaries)["labels"]
 
 
     def predict_assignment(self, assignments: list[int], summaries: dict) -> list[int]:
@@ -85,20 +56,42 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         visualization. predict_summaries() remains the lean, label-only
         entry point used by the rest of the pipeline.
         """
-        if not summaries:
-            return {"components": [], "centers": set(), "labels": {}}
+        summary = self.summarize_clustering(summaries)
+        return {
+            "components": summary["components"],
+            "centers": summary["centers"],
+            "labels": summary["labels"],
+        }
 
+    def summarize_clustering(self, summaries: dict) -> dict:
+        """
+        Run the full offline clustering pass and expose lightweight decision
+        diagnostics alongside the final summary labels.
+        """
+        if not summaries:
+            return {
+                "components": [],
+                "centers": set(),
+                "labels": {},
+                "selected_center_margins": [],
+            }
+
+        # Rebuild the final frozen metric from the surviving summaries so the
+        # offline analysis stays consistent with the online distance geometry.
         metric = self.build_metric(summaries)
         densities = self._node_density(summaries, metric)
         components = self._get_components_from_summaries(summaries)
 
         final_labels = {}
         all_centers = set()
+        selected_center_margins: list[float] = []
         global_label_offset = 0
 
         for comp in components:
-            local_labels, comp_centers = self._find_cluster_centers_plus(comp, densities, summaries, metric)
-            all_centers |= comp_centers
+            stats = self._find_cluster_centers_stats(comp, densities, summaries, metric)
+            local_labels = stats["labels"]
+            all_centers |= stats["centers"]
+            selected_center_margins.extend(stats["selected_center_margins"])
 
             for node_id, loc_label in local_labels.items():
                 final_labels[node_id] = global_label_offset + loc_label
@@ -106,7 +99,14 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             if local_labels:
                 global_label_offset += len(set(local_labels.values()))
 
-        return {"components": components, "centers": all_centers, "labels": final_labels}
+        return {
+            "components": components,
+            "centers": all_centers,
+            "labels": final_labels,
+            "metric": metric,
+            "densities": densities,
+            "selected_center_margins": selected_center_margins,
+        }
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -181,62 +181,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         """
         Finds density peaks within a component and cascades labels downhill.
         """
-        if not component: 
-            return {}
-        if len(component) == 1: 
-            return {component[0]: 0} # Only one node, it's its own center
-
-        # 1. Sort nodes by density descending
-        sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
-
-        q = {} # q[i] = nearest node of higher density
-        h = {} # h[i] = peak score
-
-        # 2. Find nearest higher-density node and calculate distances
-        for k in range(1, len(sorted_nodes)):
-            i = sorted_nodes[k]
-            w_i = summaries[i]["centroid"]
-
-            # Candidates are nodes with higher density (indices 0 to k-1)
-            candidates = [c for c in sorted_nodes[:k] if densities[c] > densities[i]]
-            if not candidates:
-                # all higher-ranked nodes are exact density ties with i;
-                # fall back to the full higher-or-equal set
-                candidates = sorted_nodes[:k]
-            dists = [metric.distance(w_i, summaries[c]["centroid"]) for c in candidates]
-
-            min_idx = np.argmin(dists)
-            q_i = candidates[min_idx]
-            d_min = dists[min_idx]
-
-            q[i] = q_i
-            h[i] = densities[i] * d_min
-
-        # 3. Handle the absolute highest density node (Global Peak of component)
-        # Peak node: per the paper, h_peak = inf, so it is always a cluster center,
-        # and h_mean is computed over the remaining nodes only
-        peak_node = sorted_nodes[0]
-        non_peak_nodes = sorted_nodes[1:]
-
-        # we give the global peak its center cluster label directly
-        local_labels = {peak_node: 0}
-        current_label = 1
-        # and we exlude it form the threshold calculation
-        h_mean = np.mean([h[node] for node in non_peak_nodes])
-
-        for node in non_peak_nodes:
-            # If peak score is high enough, it is a cluster center
-            if h[node] >= self.alpha * h_mean:
-                local_labels[node] = current_label
-                current_label += 1
-
-        # 5. Cascade labels downhill
-        for node in sorted_nodes:
-            if node not in local_labels:
-                # Inherit the label from the nearest higher density node (moving uphill)
-                local_labels[node] = local_labels[q[node]]
-
-        return local_labels
+        return self._find_cluster_centers_stats(component, densities, summaries, metric)["labels"]
 
 
     def _find_cluster_centers_plus(self, component: list[int], densities: dict, summaries: dict, metric) -> tuple[dict, set]:
@@ -245,10 +190,28 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         Returns (local_labels, centers) where centers is the set of node ids
         chosen as cluster centers in this component (before cascading).
         """
+        stats = self._find_cluster_centers_stats(component, densities, summaries, metric)
+        return stats["labels"], stats["centers"]
+
+    def _find_cluster_centers_stats(
+        self,
+        component: list[int],
+        densities: dict,
+        summaries: dict,
+        metric: SelfAdaptiveDistanceMetric,
+    ) -> dict:
+        """
+        Find density peaks and expose how confidently extra centers clear the
+        alpha * mean(h) threshold inside their component.
+        """
         if not component:
-            return {}, set()
+            return {"labels": {}, "centers": set(), "selected_center_margins": []}
         if len(component) == 1:
-            return {component[0]: 0}, {component[0]}
+            return {
+                "labels": {component[0]: 0},
+                "centers": {component[0]},
+                "selected_center_margins": [],
+            }
 
         sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
 
@@ -256,34 +219,45 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         h = {}
 
         for k in range(1, len(sorted_nodes)):
-            i = sorted_nodes[k]
-            w_i = summaries[i]["centroid"]
-            candidates = [c for c in sorted_nodes[:k] if densities[c] > densities[i]]
+            node_id = sorted_nodes[k]
+            w_i = summaries[node_id]["centroid"]
+
+            candidates = [c for c in sorted_nodes[:k] if densities[c] > densities[node_id]]
             if not candidates:
                 candidates = sorted_nodes[:k]
             dists = [metric.distance(w_i, summaries[c]["centroid"]) for c in candidates]
-            min_idx = np.argmin(dists)
+            min_idx = int(np.argmin(dists))
             q_i = candidates[min_idx]
-            d_min = dists[min_idx]
-            q[i] = q_i
-            h[i] = densities[i] * d_min
+            d_min = float(dists[min_idx])
+
+            q[node_id] = q_i
+            h[node_id] = float(densities[node_id] * d_min)
 
         peak_node = sorted_nodes[0]
         non_peak_nodes = sorted_nodes[1:]
+        threshold = float(self.alpha * np.mean([h[node] for node in non_peak_nodes]))
 
         local_labels = {peak_node: 0}
+        centers = {peak_node}
+        selected_center_margins: list[float] = []
         current_label = 1
-        h_mean = np.mean([h[node] for node in non_peak_nodes])
 
-        for node in non_peak_nodes:
-            if h[node] >= self.alpha * h_mean:
-                local_labels[node] = current_label
+        for node_id in non_peak_nodes:
+            if h[node_id] >= threshold:
+                local_labels[node_id] = current_label
+                centers.add(node_id)
                 current_label += 1
+                # Normalize the center-threshold gap so the score stays in [0, 1]
+                # and remains readable across components with different scales.
+                margin = (h[node_id] - threshold) / max(abs(h[node_id]), 1e-12)
+                selected_center_margins.append(float(np.clip(margin, 0.0, 1.0)))
 
-        centers = set(local_labels.keys())  # NEW: capture centers before cascading
+        for node_id in sorted_nodes:
+            if node_id not in local_labels:
+                local_labels[node_id] = local_labels[q[node_id]]
 
-        for node in sorted_nodes:
-            if node not in local_labels:
-                local_labels[node] = local_labels[q[node]]
-
-        return local_labels, centers
+        return {
+            "labels": local_labels,
+            "centers": centers,
+            "selected_center_margins": selected_center_margins,
+        }

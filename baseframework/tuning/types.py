@@ -15,6 +15,7 @@ class RunArtifacts:
     summaries: dict[int, dict[str, Any]]
     node_labels: dict[int, int]
     point_labels: list[int]
+    offline_summary: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
