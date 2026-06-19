@@ -161,6 +161,7 @@ def evaluate_params(
         node_labels=artifacts.node_labels,
         assignments=artifacts.assignments,
         offline_summary=artifacts.offline_summary,
+        max_nodes=max_nodes,
     )
     diagnostics.update(artifacts.diagnostics)
 
@@ -242,6 +243,7 @@ def _collect_diagnostics(
     node_labels: dict[int, int],
     assignments: list[int],
     offline_summary: dict[str, Any],
+    max_nodes: int | None = None,
     tiny_cluster_size: int = 5,
     cluster_margin_sample_size: int = DEFAULT_CLUSTER_MARGIN_SAMPLE_SIZE,
 ) -> dict[str, float]:
@@ -255,6 +257,13 @@ def _collect_diagnostics(
     n_tiny = int(np.sum(cluster_sizes < tiny_cluster_size)) if len(cluster_sizes) else 0
     tiny_points = int(sum(size for size in cluster_sizes if size < tiny_cluster_size))
     cluster_size_balance = _cluster_size_balance(cluster_sizes)
+    n_summary_components = int(_count_components(summaries))
+    n_summaries = int(len(summaries))
+    fragmentation_excess = _fragmentation_excess(
+        n_clusters=int(len(unique_clusters)),
+        n_components=n_summary_components,
+        n_summaries=n_summaries,
+    )
     cluster_margin = _cluster_assignment_margin(
         X=X,
         point_labels=labels,
@@ -271,16 +280,21 @@ def _collect_diagnostics(
     peak_confidence = _peak_center_confidence(
         selected_center_margins=offline_summary.get("selected_center_margins", []),
     )
+    missed_split_pressure = _missed_split_pressure(
+        unselected_center_ratios=offline_summary.get("unselected_center_ratios", []),
+    )
 
     return {
         "n_points": n_points,
         "n_clusters": int(len(unique_clusters)),
         "noise_frac": float(np.mean(noise_mask)) if n_points else 1.0,
         "labeled_frac": float(np.mean(~noise_mask)) if n_points else 0.0,
-        "n_summaries": int(len(summaries)),
-        "n_summary_components": int(_count_components(summaries)),
+        "n_summaries": n_summaries,
+        "n_summary_components": n_summary_components,
         "n_assigned_summaries": int(len(set(assignments))),
         "summary_ratio": float(len(summaries) / max(n_points, 1)),
+        "summary_sqrt_ratio": float(n_summaries / max(np.sqrt(max(n_points, 1)), 1.0)),
+        "summary_capacity_frac": float(n_summaries / max(max_nodes, 1)) if max_nodes is not None else float("nan"),
         "min_cluster_size": int(cluster_sizes.min()) if len(cluster_sizes) else 0,
         "max_cluster_size": int(cluster_sizes.max()) if len(cluster_sizes) else 0,
         "mean_cluster_size": float(cluster_sizes.mean()) if len(cluster_sizes) else 0.0,
@@ -294,9 +308,11 @@ def _collect_diagnostics(
         "n_tiny_clusters": n_tiny,
         "tiny_cluster_frac": float(n_tiny / max(len(unique_clusters), 1)) if len(unique_clusters) else 0.0,
         "tiny_cluster_point_frac": float(tiny_points / max(int(np.sum(~noise_mask)), 1)) if len(non_noise) else 0.0,
+        "fragmentation_excess": fragmentation_excess,
         "cluster_margin": cluster_margin,
         "cluster_separation": cluster_separation,
         "peak_confidence": peak_confidence,
+        "missed_split_pressure": missed_split_pressure,
     }
 
 
@@ -425,6 +441,26 @@ def _peak_center_confidence(
     if selected_center_margins:
         return float(np.mean(selected_center_margins))
     return float("nan")
+
+
+def _missed_split_pressure(
+    *,
+    unselected_center_ratios: list[float],
+) -> float:
+    if unselected_center_ratios:
+        return float(np.clip(max(unselected_center_ratios), 0.0, 1.0))
+    return 0.0
+
+
+def _fragmentation_excess(
+    *,
+    n_clusters: int,
+    n_components: int,
+    n_summaries: int,
+) -> float:
+    if n_summaries <= n_components:
+        return 0.0
+    return float(np.clip(max(n_clusters - n_components, 0) / max(n_summaries - n_components, 1), 0.0, 1.0))
 
 
 def _count_components(summaries: dict[int, dict[str, Any]]) -> int:

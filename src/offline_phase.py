@@ -74,6 +74,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 "centers": set(),
                 "labels": {},
                 "selected_center_margins": [],
+                "unselected_center_ratios": [],
             }
 
         # Rebuild the final frozen metric from the surviving summaries so the
@@ -85,6 +86,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         final_labels = {}
         all_centers = set()
         selected_center_margins: list[float] = []
+        unselected_center_ratios: list[float] = []
         global_label_offset = 0
 
         for comp in components:
@@ -92,6 +94,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             local_labels = stats["labels"]
             all_centers |= stats["centers"]
             selected_center_margins.extend(stats["selected_center_margins"])
+            unselected_center_ratios.extend(stats["unselected_center_ratios"])
 
             for node_id, loc_label in local_labels.items():
                 final_labels[node_id] = global_label_offset + loc_label
@@ -106,6 +109,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             "metric": metric,
             "densities": densities,
             "selected_center_margins": selected_center_margins,
+            "unselected_center_ratios": unselected_center_ratios,
         }
 
     # ------------------------------------------------------------------ #
@@ -205,12 +209,18 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         alpha * mean(h) threshold inside their component.
         """
         if not component:
-            return {"labels": {}, "centers": set(), "selected_center_margins": []}
+            return {
+                "labels": {},
+                "centers": set(),
+                "selected_center_margins": [],
+                "unselected_center_ratios": [],
+            }
         if len(component) == 1:
             return {
                 "labels": {component[0]: 0},
                 "centers": {component[0]},
                 "selected_center_margins": [],
+                "unselected_center_ratios": [],
             }
 
         sorted_nodes = sorted(component, key=lambda nid: densities[nid], reverse=True)
@@ -240,6 +250,7 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
         local_labels = {peak_node: 0}
         centers = {peak_node}
         selected_center_margins: list[float] = []
+        unselected_center_ratios: list[float] = []
         current_label = 1
 
         for node_id in non_peak_nodes:
@@ -251,6 +262,9 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
                 # and remains readable across components with different scales.
                 margin = (h[node_id] - threshold) / max(abs(h[node_id]), 1e-12)
                 selected_center_margins.append(float(np.clip(margin, 0.0, 1.0)))
+            else:
+                ratio = h[node_id] / max(abs(threshold), 1e-12)
+                unselected_center_ratios.append(float(np.clip(ratio, 0.0, 1.0)))
 
         for node_id in sorted_nodes:
             if node_id not in local_labels:
@@ -260,4 +274,5 @@ class DenSOINNOfflinePhase(OfflinePhase_Clusterer):
             "labels": local_labels,
             "centers": centers,
             "selected_center_margins": selected_center_margins,
+            "unselected_center_ratios": unselected_center_ratios,
         }

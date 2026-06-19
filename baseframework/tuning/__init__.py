@@ -6,6 +6,7 @@ from .objectives import (
     make_unsupervised_objective,
     make_unsupervised_v2_objective,
     make_unsupervised_v3_objective,
+    make_unsupervised_v4_objective,
 )
 from .types import EvaluationRecord, ObjectiveResult, RunArtifacts, SearchResult
 
@@ -19,5 +20,6 @@ __all__ = [
     "make_unsupervised_objective",
     "make_unsupervised_v2_objective",
     "make_unsupervised_v3_objective",
+    "make_unsupervised_v4_objective",
     "run_search",
 ]

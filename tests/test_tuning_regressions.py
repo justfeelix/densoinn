@@ -11,7 +11,11 @@ if str(ROOT) not in sys.path:
 from baseframework.datahandler import load_data
 from baseframework.stream_clustering import OfflinePhase_Clusterer
 from baseframework.tuning.engine import run_search
-from baseframework.tuning.objectives import make_unsupervised_v2_objective, make_unsupervised_v3_objective
+from baseframework.tuning.objectives import (
+    make_unsupervised_v2_objective,
+    make_unsupervised_v3_objective,
+    make_unsupervised_v4_objective,
+)
 from baseframework.tuning.types import EvaluationRecord, ObjectiveResult
 from src.eval.densoinn_eval import evaluate_params, reconstruct_point_labels
 
@@ -191,6 +195,80 @@ class TuningRegressionTests(unittest.TestCase):
 
         self.assertGreater(objective(stronger).score, objective(weaker).score)
 
+    def test_unsupervised_v4_aggregates_underfit_and_capacity_penalties(self):
+        record = EvaluationRecord(
+            params={},
+            internal_metrics={"ts": 0.4},
+            diagnostics={
+                "n_clusters": 3,
+                "n_points": 100,
+                "noise_frac": 0.1,
+                "labeled_frac": 0.9,
+                "cluster_margin": 0.75,
+                "cluster_separation": 0.6,
+                "cluster_size_balance": 0.8,
+                "peak_confidence": 0.5,
+                "summary_capacity_frac": 0.9,
+                "summary_sqrt_ratio": 1.0,
+                "dominant_cluster_frac": 0.7,
+                "missed_split_pressure": 0.925,
+                "fragmentation_excess": 0.2,
+                "tiny_cluster_point_frac": 0.1,
+            },
+        )
+
+        result = make_unsupervised_v4_objective()(record)
+
+        self.assertTrue(result.valid)
+        self.assertAlmostEqual(result.score, 0.3096969696969697)
+        self.assertAlmostEqual(result.details["ts_term"], 0.7)
+        self.assertAlmostEqual(result.details["cluster_margin_term"], 0.75)
+        self.assertAlmostEqual(result.details["cluster_separation_term"], 0.6)
+        self.assertAlmostEqual(result.details["cluster_balance_term"], 0.8)
+        self.assertAlmostEqual(result.details["summary_capacity_pressure"], 1.0 / 3.0)
+        self.assertAlmostEqual(result.details["summary_shape_pressure"], 1.0 / 3.0)
+        self.assertAlmostEqual(result.details["dominant_cluster_pressure"], 0.4545454545454545)
+        self.assertAlmostEqual(result.details["missed_split_pressure_term"], 0.5)
+
+    def test_unsupervised_v4_penalizes_confident_undersegmentation(self):
+        base_diagnostics = {
+            "n_clusters": 3,
+            "n_points": 100,
+            "noise_frac": 0.0,
+            "labeled_frac": 1.0,
+            "cluster_margin": 0.82,
+            "cluster_separation": 0.55,
+            "cluster_size_balance": 0.8,
+            "peak_confidence": float("nan"),
+            "summary_capacity_frac": 0.2,
+            "fragmentation_excess": 0.0,
+            "tiny_cluster_point_frac": 0.0,
+        }
+        underfit = EvaluationRecord(
+            params={},
+            internal_metrics={"ts": 0.45},
+            diagnostics={
+                **base_diagnostics,
+                "summary_sqrt_ratio": 0.8,
+                "dominant_cluster_frac": 0.78,
+                "missed_split_pressure": 0.96,
+            },
+        )
+        better_shape = EvaluationRecord(
+            params={},
+            internal_metrics={"ts": 0.45},
+            diagnostics={
+                **base_diagnostics,
+                "summary_sqrt_ratio": 3.0,
+                "dominant_cluster_frac": 0.30,
+                "missed_split_pressure": 0.40,
+            },
+        )
+
+        objective = make_unsupervised_v4_objective()
+
+        self.assertGreater(objective(better_shape).score, objective(underfit).score)
+
     def test_evaluate_params_exposes_richer_unsupervised_diagnostics(self):
         X, y = load_data("complex9", scale=False, include_labels=False)
         record = evaluate_params(
@@ -211,6 +289,11 @@ class TuningRegressionTests(unittest.TestCase):
         self.assertIn("peak_confidence", record.diagnostics)
         self.assertIn("cluster_separation", record.diagnostics)
         self.assertIn("cluster_size_balance", record.diagnostics)
+        self.assertIn("dominant_cluster_frac", record.diagnostics)
+        self.assertIn("fragmentation_excess", record.diagnostics)
+        self.assertIn("missed_split_pressure", record.diagnostics)
+        self.assertIn("summary_capacity_frac", record.diagnostics)
+        self.assertIn("summary_sqrt_ratio", record.diagnostics)
         self.assertGreaterEqual(record.diagnostics["cluster_margin"], 0.0)
         self.assertLessEqual(record.diagnostics["cluster_margin"], 1.0)
         peak_confidence = record.diagnostics["peak_confidence"]
@@ -219,6 +302,11 @@ class TuningRegressionTests(unittest.TestCase):
         self.assertLessEqual(record.diagnostics["cluster_separation"], 1.0)
         self.assertGreaterEqual(record.diagnostics["cluster_size_balance"], 0.0)
         self.assertLessEqual(record.diagnostics["cluster_size_balance"], 1.0)
+        self.assertGreaterEqual(record.diagnostics["missed_split_pressure"], 0.0)
+        self.assertLessEqual(record.diagnostics["missed_split_pressure"], 1.0)
+        self.assertGreaterEqual(record.diagnostics["summary_capacity_frac"], 0.0)
+        self.assertLessEqual(record.diagnostics["summary_capacity_frac"], 1.0)
+        self.assertGreater(record.diagnostics["summary_sqrt_ratio"], 0.0)
 
 
 if __name__ == "__main__":
