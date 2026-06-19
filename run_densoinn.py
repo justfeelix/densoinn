@@ -2,8 +2,7 @@
 Main entry point for running and experimenting with DenSOINN.
 
 Drives the full online/offline pipeline on a dataset and evaluates the result
-with CMM + Temporal Silhouette. This is the orchestration scaffold; the actual
-algorithm lives in the src/ classes.
+using 10 randomized runs, reporting Mean ± Std Dev for CMM, TS, NMI, and ARI.
 """
 
 import sys
@@ -12,134 +11,134 @@ sys.path.insert(0, 'baseframework/')
 
 import argparse
 import numpy as np
+from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
 from src.densoinn import DenSOINN
 from baseframework.datahandler import load_data
+
 try:
     from baseframework.metrics.cmm import get_cmm
     from baseframework.metrics.TSindex import tempsil
 except ImportError:
-    print("Warning: Could not import metrics!")
+    print("Warning: Could not import CMM or TS metrics!")
 
 
-def _evaluate(X_acc, y_acc, labels_acc, ts_acc):
-    """Compute and print CMM and Temporal Silhouette on accumulated data."""
-    labels_arr = np.array(labels_acc)
+def _evaluate(X_acc, y_acc, labels_arr, ts_acc):
+    """Compute metrics for a single run."""
     unique_clusters = np.unique(labels_arr[labels_arr != -1])
-    if len(unique_clusters) < 2:
-        print("   [Eval] Skipped: fewer than 2 non-noise clusters found.")
-        return
+    
+    # Scikit-Learn Metrics (Matches the Paper)
+    nmi = normalized_mutual_info_score(y_acc, labels_arr)
+    ari = adjusted_rand_score(y_acc, labels_arr)
 
-    w = np.ones(len(X_acc))
-    cmm = get_cmm(np.array(X_acc), np.array(y_acc), labels_arr, w, k=5)
-    _, _, ts = tempsil(np.array(ts_acc), np.array(X_acc), labels_arr)
-    print(f"   [Eval] CMM={cmm:.4f}  |  TS={ts:.4f}  |  "
-          f"n={len(labels_arr)}  k={len(unique_clusters)}")
+    # Baseframework Metrics
+    cmm, ts = 0.0, 0.0
+    if len(unique_clusters) >= 2:
+        w = np.ones(len(X_acc))
+        try:
+            cmm = get_cmm(np.array(X_acc), np.array(y_acc), labels_arr, w, k=5)
+            _, _, ts = tempsil(np.array(ts_acc), np.array(X_acc), labels_arr)
+        except Exception as e:
+            print(f"      [Metric Warning] Framework metric failed: {e}")
+
+    return cmm, ts, nmi, ari, len(unique_clusters)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run DenSOINN Clustering Simulation")
 
-    # Dataset / batching
+    # Dataset / batching / runs
     parser.add_argument('--dataset', type=str, default='complex9',
-                        help='Dataset name: complex9, rbf3, har, stream_densired')
+                        help='Dataset name: complex9, rbf3, har, spiral, stream_densired')
     parser.add_argument('--batch_size', type=int, default=500,
                         help='Number of instances per batch')
+    parser.add_argument('--runs', type=int, default=10,
+                        help='Number of randomized runs to average over (default: 10)')
     parser.add_argument('--raw', action='store_true',
-                        help='Disable min-max scaling and feed raw data. DenSOINN is '
-                             'designed to handle this via its self-adaptive distance metric.')
+                        help='Disable min-max scaling and feed raw data. Tests the self-adaptive metric.')
 
-    # DenSOINN online parameters (paper defaults)
-    parser.add_argument('--gamma', type=float, default=0.25,
-                        help='Edge weight decay speed (recommended [0.1, 1])')
-    parser.add_argument('--stream_speed', type=int, default=200,
-                        help='Patterns per time period; denoising runs every stream_speed inputs '
-                             '(recommended [50, 200])')
-    parser.add_argument('--epsilon', type=float, default=0.5,
-                        help='Denoising intensity (recommended [0.2, 1])')
-    parser.add_argument('--max_nodes', type=int, default=1000,
-                        help='Maximum number of network nodes')
+    # DenSOINN online parameters
+    parser.add_argument('--gamma', type=float, default=0.25)
+    parser.add_argument('--stream_speed', type=int, default=200)
+    parser.add_argument('--epsilon', type=float, default=0.5)
+    parser.add_argument('--max_nodes', type=int, default=1000)
 
     # DenSOINN offline parameters
-    parser.add_argument('--alpha', type=float, default=5.0,
-                        help='Cluster-center sensitivity (recommended [2, 10], typically 5)')
-    parser.add_argument('--intrinsic_dim', type=int, default=2,
-                        help='Estimated intrinsic dimensionality for the density estimate')
-
-    # Offline phase / evaluation
-    parser.add_argument('--offline_interval', type=int, default=1,
-                        help='Run offline clustering + evaluation every N batches (0 = only at end of stream)')
+    parser.add_argument('--alpha', type=float, default=5.0)
+    parser.add_argument('--intrinsic_dim', type=int, default=2)
 
     args = parser.parse_args()
 
     print(f"Loading data '{args.dataset}'...")
-    X, y = load_data(args.dataset, scale=not args.raw)
-
-    densoinn = DenSOINN(
-        gamma=args.gamma,
-        stream_speed=args.stream_speed,
-        epsilon=args.epsilon,
-        max_nodes=args.max_nodes,
-        alpha=args.alpha,
-        intrinsic_dim=args.intrinsic_dim,
-    )
-
-    num_batches = len(X) // args.batch_size
+    X_original, y_original = load_data(args.dataset, scale=not args.raw)
 
     print(f"\n=======================================================")
-    print(f"STARTING STREAM PROCESSING: {num_batches} batches of size {args.batch_size}")
-    print(f"PARAMETERS: gamma={args.gamma}  stream_speed={args.stream_speed}  "
-          f"epsilon={args.epsilon}  max_nodes={args.max_nodes}")
-    print(f"            alpha={args.alpha}  intrinsic_dim={args.intrinsic_dim}  "
-          f"scaling={'off (raw)' if args.raw else 'on'}")
+    print(f"DATASET: {args.dataset} | Patterns: {len(X_original)} | Features: {X_original.shape[1]}")
+    print(f"EVALUATION: {args.runs} Randomized Runs")
+    print(f"PARAMETERS: gamma={args.gamma} | stream_speed={args.stream_speed} | epsilon={args.epsilon}")
+    print(f"            alpha={args.alpha} | intrinsic_dim={args.intrinsic_dim} | scaling={'off (raw)' if args.raw else 'on'}")
     print(f"=======================================================\n")
 
-    # Accumulators — store every point's authoritative summary_id (node id) from
-    # the online phase, so the final offline pass needs no nearest-node approximation.
-    all_X, all_y, all_assignments, all_ts = [], [], [], []
+    # Store results across all runs
+    all_cmm, all_ts, all_nmi, all_ari, all_k = [], [], [], [], []
 
-    for i in range(num_batches + 1):
-        start_idx = i * args.batch_size
-        end_idx = min((i + 1) * args.batch_size, len(X))
-        batch = X[start_idx:end_idx]
+    for run in range(args.runs):
+        print(f"--- Starting Run {run + 1}/{args.runs} ---")
+        
+        # 1. Randomize the input sequence for this run
+        indices = np.random.permutation(len(X_original))
+        X = X_original[indices]
+        y = y_original[indices]
 
-        if len(batch) == 0:
-            break
-
-        timestamps = np.arange(start_idx, end_idx)
-
-        # ONLINE PHASE — each result is (summary_id, cluster_id, event_log)
-        results = densoinn.learn(batch, timestamps)
-        batch_assignments = [r[0] for r in results]
-
-        all_X.extend(batch)
-        all_y.extend(y[start_idx:end_idx])
-        all_assignments.extend(batch_assignments)
-        all_ts.extend(timestamps)
-
-        print(f"   Batch {i:>4d} | points so far: {len(all_X):>6d}")
-
-        # OFFLINE PHASE — only on demand
-        run_offline = (
-            args.offline_interval > 0 and (i + 1) % args.offline_interval == 0
+        # 2. Initialize a fresh DenSOINN instance
+        densoinn = DenSOINN(
+            gamma=args.gamma,
+            stream_speed=args.stream_speed,
+            epsilon=args.epsilon,
+            max_nodes=args.max_nodes,
+            alpha=args.alpha,
+            intrinsic_dim=args.intrinsic_dim,
         )
-        if run_offline:
-            labels = densoinn.predict(assignments=batch_assignments)
-            num_clusters = len(np.unique(np.array(labels)[np.array(labels) != -1]))
-            print(f"          [Offline] clusters this batch: {num_clusters}")
-            _evaluate(list(batch), list(y[start_idx:end_idx]), labels, list(timestamps))
 
-    # Final offline phase + evaluation — uses stored authoritative assignments
-    # for the full stream, no nearest-node approximation needed.
-    # TODO (paper reproduction): to match the paper, label each point by its
-    # nearest surviving node instead, i.e. replace the line below with
-    #   final_labels = densoinn.predict_points(np.array(all_X))
-    print(f"\n--- Final offline clustering + evaluation ---")
-    final_labels = densoinn.predict(assignments=all_assignments)
-    final_arr = np.array(final_labels)
-    unique_clusters = np.unique(final_arr[final_arr != -1])
-    print(f"    Total points: {len(all_X)}  |  clusters: {len(unique_clusters)}")
-    _evaluate(all_X, all_y, final_labels, all_ts)
+        # 3. Online Phase (Streaming)
+        num_batches = len(X) // args.batch_size
+        timestamps = np.arange(len(X))
+        
+        for i in range(num_batches + 1):
+            start_idx = i * args.batch_size
+            end_idx = min((i + 1) * args.batch_size, len(X))
+            batch = X[start_idx:end_idx]
+            batch_ts = timestamps[start_idx:end_idx]
 
+            if len(batch) == 0:
+                break
+            
+            # Feed batch to online phase
+            densoinn.learn(batch, batch_ts)
+
+        # 4. Final Offline Phase & Evaluation (Paper Protocol)
+        # We use predict_points to assign each point to the nearest surviving node
+        final_labels = densoinn.predict_points(X)
+        
+        cmm, ts, nmi, ari, k = _evaluate(X, y, final_labels, timestamps)
+        
+        print(f"    Result: k={k} | NMI={nmi:.4f} | ARI={ari:.4f} | CMM={cmm:.4f} | TS={ts:.4f}\n")
+        
+        all_cmm.append(cmm)
+        all_ts.append(ts)
+        all_nmi.append(nmi)
+        all_ari.append(ari)
+        all_k.append(k)
+
+    # Print Final Averaged Results for the Table
+    print(f"=======================================================")
+    print(f"FINAL AVERAGED RESULTS OVER {args.runs} RUNS ({args.dataset})")
+    print(f"=======================================================")
+    print(f"Clusters (k): {np.mean(all_k):.1f} ± {np.std(all_k):.1f}")
+    print(f"NMI:          {np.mean(all_nmi):.4f} ± {np.std(all_nmi):.4f}")
+    print(f"ARI:          {np.mean(all_ari):.4f} ± {np.std(all_ari):.4f}")
+    print(f"CMM:          {np.mean(all_cmm):.4f} ± {np.std(all_cmm):.4f}")
+    print(f"TS:           {np.mean(all_ts):.4f} ± {np.std(all_ts):.4f}")
+    print(f"=======================================================")
 
 if __name__ == '__main__':
     main()
