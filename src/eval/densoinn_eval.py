@@ -254,6 +254,7 @@ def _collect_diagnostics(
     n_singletons = int(np.sum(cluster_sizes == 1)) if len(cluster_sizes) else 0
     n_tiny = int(np.sum(cluster_sizes < tiny_cluster_size)) if len(cluster_sizes) else 0
     tiny_points = int(sum(size for size in cluster_sizes if size < tiny_cluster_size))
+    cluster_size_balance = _cluster_size_balance(cluster_sizes)
     cluster_margin = _cluster_assignment_margin(
         X=X,
         point_labels=labels,
@@ -261,6 +262,11 @@ def _collect_diagnostics(
         node_labels=node_labels,
         metric=offline_summary.get("metric"),
         sample_size=cluster_margin_sample_size,
+    )
+    cluster_separation = _summary_cluster_separation(
+        summaries=summaries,
+        node_labels=node_labels,
+        metric=offline_summary.get("metric"),
     )
     peak_confidence = _peak_center_confidence(
         selected_center_margins=offline_summary.get("selected_center_margins", []),
@@ -279,14 +285,33 @@ def _collect_diagnostics(
         "max_cluster_size": int(cluster_sizes.max()) if len(cluster_sizes) else 0,
         "mean_cluster_size": float(cluster_sizes.mean()) if len(cluster_sizes) else 0.0,
         "median_cluster_size": float(np.median(cluster_sizes)) if len(cluster_sizes) else 0.0,
+        "dominant_cluster_frac": float(cluster_sizes.max() / max(int(np.sum(~noise_mask)), 1))
+        if len(cluster_sizes)
+        else 0.0,
+        "cluster_size_balance": cluster_size_balance,
         "n_singleton_clusters": n_singletons,
         "singleton_cluster_frac": float(n_singletons / max(len(unique_clusters), 1)) if len(unique_clusters) else 0.0,
         "n_tiny_clusters": n_tiny,
         "tiny_cluster_frac": float(n_tiny / max(len(unique_clusters), 1)) if len(unique_clusters) else 0.0,
         "tiny_cluster_point_frac": float(tiny_points / max(int(np.sum(~noise_mask)), 1)) if len(non_noise) else 0.0,
         "cluster_margin": cluster_margin,
+        "cluster_separation": cluster_separation,
         "peak_confidence": peak_confidence,
     }
+
+
+def _cluster_size_balance(cluster_sizes: np.ndarray) -> float:
+    if len(cluster_sizes) < 2:
+        return float("nan")
+
+    total = float(np.sum(cluster_sizes))
+    if total <= 0.0:
+        return float("nan")
+
+    proportions = np.asarray(cluster_sizes, dtype=float) / total
+    entropy = -float(np.sum(proportions * np.log(np.clip(proportions, 1e-12, 1.0))))
+    effective_clusters = float(np.exp(entropy))
+    return float(np.clip(effective_clusters / len(cluster_sizes), 0.0, 1.0))
 
 
 def _cluster_assignment_margin(
@@ -332,6 +357,65 @@ def _cluster_assignment_margin(
         margins.append(float(np.clip(margin, 0.0, 1.0)))
 
     return float(np.mean(margins)) if margins else float("nan")
+
+
+def _summary_cluster_separation(
+    *,
+    summaries: dict[int, dict[str, Any]],
+    node_labels: dict[int, int],
+    metric,
+) -> float:
+    if metric is None or not summaries:
+        return float("nan")
+
+    cluster_ids = sorted({cluster_id for cluster_id in node_labels.values() if cluster_id != -1})
+    centers: list[np.ndarray] = []
+    radii: list[float] = []
+    for cluster_id in cluster_ids:
+        nodes = [
+            node_id
+            for node_id, label in node_labels.items()
+            if label == cluster_id and node_id in summaries
+        ]
+        if not nodes:
+            continue
+
+        centroids = np.asarray([summaries[node_id]["centroid"] for node_id in nodes], dtype=float)
+        weights = np.asarray([
+            max(float(summaries[node_id].get("weight", 1.0)), 0.0)
+            for node_id in nodes
+        ])
+        if float(np.sum(weights)) <= 0.0:
+            weights = np.ones(len(nodes), dtype=float)
+
+        center = np.average(centroids, axis=0, weights=weights)
+        centers.append(center)
+        dists = metric.distance_to_nodes(center, centroids)
+        radii.append(float(np.average(dists, weights=weights)))
+
+    if len(centers) < 2:
+        return float("nan")
+
+    pair_scores: list[float] = []
+    pair_distances: list[float] = []
+    for i in range(len(centers)):
+        for j in range(i + 1, len(centers)):
+            distance = float(metric.distance(centers[i], centers[j]))
+            if distance > 0.0:
+                pair_distances.append(distance)
+
+    if not pair_distances:
+        return 0.0
+
+    distance_floor = 0.05 * float(np.median(pair_distances))
+    for i in range(len(centers)):
+        for j in range(i + 1, len(centers)):
+            distance = float(metric.distance(centers[i], centers[j]))
+            denominator = distance + radii[i] + radii[j] + distance_floor
+            pair_scores.append(distance / max(denominator, 1e-12))
+
+    percentile = 10 if len(pair_scores) >= 10 else 0
+    return float(np.clip(np.percentile(pair_scores, percentile), 0.0, 1.0))
 
 
 def _peak_center_confidence(

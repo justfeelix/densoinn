@@ -26,6 +26,7 @@ from baseframework.tuning.objectives import (
     make_supervised_objective,
     make_unsupervised_objective,
     make_unsupervised_v2_objective,
+    make_unsupervised_v3_objective,
 )
 from baseframework.tuning.reporting import (
     format_search_result,
@@ -47,8 +48,8 @@ def main():
     parser.add_argument("--method", choices=["grid", "random", "refined"], default="grid")
     parser.add_argument(
         "--objective",
-        choices=["unsupervised", "unsupervised_v2", "supervised"],
-        default="unsupervised",
+        choices=["unsupervised", "unsupervised_v2", "unsupervised_v3", "supervised"],
+        default="unsupervised_v3",
     )
     parser.add_argument("--n_iter", type=int, default=30, help="Number of random samples")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random search")
@@ -68,6 +69,13 @@ def main():
     parser.add_argument("--v2_cluster_margin_weight", type=float, default=0.25)
     parser.add_argument("--v2_peak_confidence_weight", type=float, default=0.20)
     parser.add_argument("--v2_summary_ratio_penalty_weight", type=float, default=0.20)
+    parser.add_argument("--v3_ts_weight", type=float, default=0.25)
+    parser.add_argument("--v3_cluster_margin_weight", type=float, default=0.25)
+    parser.add_argument("--v3_cluster_separation_weight", type=float, default=0.25)
+    parser.add_argument("--v3_cluster_balance_weight", type=float, default=0.15)
+    parser.add_argument("--v3_peak_confidence_weight", type=float, default=0.10)
+    parser.add_argument("--v3_summary_ratio_penalty_weight", type=float, default=0.30)
+    parser.add_argument("--v3_tiny_cluster_penalty_weight", type=float, default=0.10)
     parser.add_argument("--ts_window", type=int, default=200)
     parser.add_argument("--ts_kn", type=int, default=200)
     parser.add_argument("--ts_c", type=float, default=1.0)
@@ -208,7 +216,16 @@ def main():
         )
 
     csv_path = write_results_csv(results, os.path.join(args.plot_dir, "results.csv"))
-    if args.objective == "unsupervised_v2":
+    if args.objective == "unsupervised_v3":
+        top_metrics = [
+            "internal.ts",
+            "diagnostics.cluster_margin",
+            "diagnostics.cluster_separation",
+            "diagnostics.cluster_size_balance",
+            "diagnostics.summary_ratio",
+            "diagnostics.n_clusters",
+        ]
+    elif args.objective == "unsupervised_v2":
         top_metrics = [
             "internal.ts",
             "diagnostics.labeled_frac",
@@ -245,6 +262,16 @@ def _build_objective(args):
             peak_confidence_weight=args.v2_peak_confidence_weight,
             summary_ratio_penalty_weight=args.v2_summary_ratio_penalty_weight,
         )
+    if args.objective == "unsupervised_v3":
+        return make_unsupervised_v3_objective(
+            ts_weight=args.v3_ts_weight,
+            cluster_margin_weight=args.v3_cluster_margin_weight,
+            cluster_separation_weight=args.v3_cluster_separation_weight,
+            cluster_balance_weight=args.v3_cluster_balance_weight,
+            peak_confidence_weight=args.v3_peak_confidence_weight,
+            summary_ratio_penalty_weight=args.v3_summary_ratio_penalty_weight,
+            tiny_cluster_penalty_weight=args.v3_tiny_cluster_penalty_weight,
+        )
     return make_unsupervised_objective(
         noise_penalty_weight=args.noise_penalty_weight,
         tiny_cluster_penalty_weight=args.tiny_cluster_penalty_weight,
@@ -254,7 +281,17 @@ def _build_objective(args):
 
 
 def _build_reporter(objective_name: str, *, include_external: bool):
-    if objective_name == "unsupervised_v2":
+    if objective_name == "unsupervised_v3":
+        extra_metrics = [
+            "internal.ts",
+            "diagnostics.cluster_margin",
+            "diagnostics.cluster_separation",
+            "diagnostics.cluster_size_balance",
+            "diagnostics.summary_ratio",
+            "diagnostics.n_clusters",
+            "diagnostics.noise_frac",
+        ]
+    elif objective_name == "unsupervised_v2":
         extra_metrics = [
             "internal.ts",
             "diagnostics.labeled_frac",

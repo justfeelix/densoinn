@@ -184,6 +184,129 @@ def make_unsupervised_v2_objective(
     return objective
 
 
+def make_unsupervised_v3_objective(
+    *,
+    ts_weight: float = 0.25,
+    cluster_margin_weight: float = 0.25,
+    cluster_separation_weight: float = 0.25,
+    cluster_balance_weight: float = 0.15,
+    peak_confidence_weight: float = 0.10,
+    summary_ratio_penalty_weight: float = 0.30,
+    tiny_cluster_penalty_weight: float = 0.10,
+    min_clusters: int = 2,
+    min_labeled_points: int = 20,
+    max_noise_frac: float = 0.98,
+):
+    """Rank candidates with confidence plus compact label-free structure checks."""
+
+    weights = {
+        "ts_term": ts_weight,
+        "cluster_margin_term": cluster_margin_weight,
+        "cluster_separation_term": cluster_separation_weight,
+        "cluster_balance_term": cluster_balance_weight,
+        "peak_confidence_term": peak_confidence_weight,
+    }
+    penalties = {
+        "summary_ratio_penalty_weight": summary_ratio_penalty_weight,
+        "tiny_cluster_penalty_weight": tiny_cluster_penalty_weight,
+    }
+    has_negative_weight = any(weight < 0.0 for weight in weights.values())
+    has_negative_penalty = any(weight < 0.0 for weight in penalties.values())
+    if has_negative_weight or has_negative_penalty:
+        raise ValueError("unsupervised_v3 weights must be non-negative")
+    if sum(weights.values()) <= 0.0:
+        raise ValueError("unsupervised_v3 requires at least one positive weight")
+
+    def objective(record: EvaluationRecord) -> ObjectiveResult:
+        valid, reason, details = basic_clustering_guard(
+            record,
+            min_clusters=min_clusters,
+            min_labeled_points=min_labeled_points,
+            max_noise_frac=max_noise_frac,
+        )
+        if not valid:
+            return ObjectiveResult(
+                name="unsupervised_v3",
+                score=float("-inf"),
+                valid=False,
+                reason=reason,
+                details=details,
+            )
+
+        ts = float(record.internal_metrics.get("ts", float("nan")))
+        cluster_margin = float(record.diagnostics.get("cluster_margin", float("nan")))
+        cluster_separation = float(record.diagnostics.get("cluster_separation", float("nan")))
+        cluster_balance = float(record.diagnostics.get("cluster_size_balance", float("nan")))
+        peak_confidence = float(record.diagnostics.get("peak_confidence", float("nan")))
+        summary_ratio = float(record.diagnostics.get("summary_ratio", 0.0))
+        tiny_cluster_point_frac = float(record.diagnostics.get("tiny_cluster_point_frac", 0.0))
+        required_terms = (ts, cluster_margin, cluster_separation, cluster_balance)
+        if any(math.isnan(value) for value in required_terms):
+            return ObjectiveResult(
+                name="unsupervised_v3",
+                score=float("-inf"),
+                valid=False,
+                reason="missing unsupervised_v3 score term",
+                details=details,
+            )
+
+        ts_term = _clip01((ts + 1.0) / 2.0)
+        cluster_margin_term = _clip01(cluster_margin)
+        cluster_separation_term = _clip01(cluster_separation)
+        cluster_balance_term = _clip01(cluster_balance)
+        peak_confidence_term = float("nan") if math.isnan(peak_confidence) else _clip01(peak_confidence)
+        summary_penalty = summary_ratio_penalty_weight * _clip01(summary_ratio)
+        tiny_cluster_penalty = tiny_cluster_penalty_weight * _clip01(tiny_cluster_point_frac)
+        score_terms = {
+            "ts_term": ts_term,
+            "cluster_margin_term": cluster_margin_term,
+            "cluster_separation_term": cluster_separation_term,
+            "cluster_balance_term": cluster_balance_term,
+            "peak_confidence_term": peak_confidence_term,
+        }
+        weighted_sum = sum(
+            weights[name] * value
+            for name, value in score_terms.items()
+            if weights[name] > 0.0 and not math.isnan(value)
+        )
+        active_weight = sum(
+            weights[name]
+            for name, value in score_terms.items()
+            if weights[name] > 0.0 and not math.isnan(value)
+        )
+        if active_weight <= 0.0:
+            return ObjectiveResult(
+                name="unsupervised_v3",
+                score=float("-inf"),
+                valid=False,
+                reason="no active unsupervised_v3 score terms",
+                details=details,
+            )
+
+        score = weighted_sum / active_weight - summary_penalty - tiny_cluster_penalty
+
+        return ObjectiveResult(
+            name="unsupervised_v3",
+            score=score,
+            valid=True,
+            reason="ok",
+            details={
+                "ts_raw": ts,
+                "ts_term": ts_term,
+                "cluster_margin_term": cluster_margin_term,
+                "cluster_separation_term": cluster_separation_term,
+                "cluster_balance_term": cluster_balance_term,
+                "peak_confidence_term": peak_confidence_term,
+                "summary_penalty": summary_penalty,
+                "tiny_cluster_penalty": tiny_cluster_penalty,
+                "active_weight": active_weight,
+                **details,
+            },
+        )
+
+    return objective
+
+
 def make_supervised_objective(
     *,
     metric_name: str = "cmm",
