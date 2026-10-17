@@ -7,6 +7,41 @@ def read_file(dsname):
         y = np.load("./data/HAR_label.npy", allow_pickle=True)
         y = y.reshape(1, len(y))[0]
         return X, y
+    elif dsname == "spiral": # artifitically generated  spiral dataset
+        X = np.load("./data/spiral_data.npy", allow_pickle=True)
+        y = np.load("./data/spiral_label.npy", allow_pickle=True)
+        y = y.reshape(1, len(y))[0]
+        return X, y
+    elif dsname == "kdd99": 
+        X = np.load("./data/kdd99_10pct_data.npy", allow_pickle=True)
+        y = np.load("./data/kdd99_10pct_label.npy", allow_pickle=True)
+        # Ensure y is a 1D array to match your pipeline
+        if len(y.shape) > 1:
+            y = y.reshape(1, len(y))[0]
+        return X, y
+
+    elif dsname == "kdd99_mini": 
+        X = np.load("./data/kdd99_mini_data.npy", allow_pickle=True)
+        y = np.load("./data/kdd99_mini_label.npy", allow_pickle=True)
+        # Ensure y is a 1D array to match your pipeline
+        if len(y.shape) > 1:
+            y = y.reshape(1, len(y))[0]
+        return X, y
+    
+    elif dsname == "covtype_mini": 
+        X = np.load("./data/covtype_mini_data.npy", allow_pickle=True)
+        y = np.load("./data/covtype_mini_label.npy", allow_pickle=True)
+        if len(y.shape) > 1:
+            y = y.reshape(1, len(y))[0]
+        return X, y
+    
+    elif dsname == "covtype_50": 
+        X = np.load("./data/covtype_50k_data.npy", allow_pickle=True)
+        y = np.load("./data/covtype_50k_label.npy", allow_pickle=True)
+        if len(y.shape) > 1:
+            y = y.reshape(1, len(y))[0]
+        return X, y
+    
     elif dsname == "stream_densired": # own
         X = np.load("./data/stream_densired_data.npy", allow_pickle=True)
         y = np.load("./data/stream_densired_label.npy", allow_pickle=True)
@@ -38,7 +73,7 @@ def load_data(dsname, batch=None, batch_max=None, scale=True):
     return X, y
 
 if __name__ == "__main__":
-    for ds in ["complex9", "stream_densired", "rbf3", "har"]:
+    for ds in ["complex9", "stream_densired", "rbf3", "har", "spiral"]:
          data, label = load_data(ds)
          print(f"{ds}: N: {len(label)}, d: {data.shape[1]}, k: {len(np.unique(label))}")
 
